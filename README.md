@@ -1,28 +1,25 @@
-# BillarElBrujoApi
+# BillarElBrujoApi V5
 
-API ASP.NET Core para conectar el sistema BILLAR EL BRUJO con MySQL en Railway.
+API ASP.NET Core para Railway + MySQL + Google Sheets.
 
-## Prueba
+## Rutas principales
 
-Cuando esté desplegada en Railway, abrir:
+- `/health`
+- `/api/sheets/status`
+- `/api/sheets/sync`
 
-`/health`
+## Variables Railway necesarias
 
-Debe responder:
-
-```json
-{
-  "ok": true,
-  "database": "railway",
-  "mysql": "conectado"
-}
-```
-
-## Variables necesarias en Railway
-
+MySQL:
 - MYSQL_URL
 - MYSQLHOST
 - MYSQLPORT
 - MYSQLDATABASE
 - MYSQLUSER
 - MYSQLPASSWORD
+
+Google Sheets:
+- GOOGLE_SHEET_ID
+- GOOGLE_CREDENTIALS_JSON
+
+No subir credenciales a GitHub.

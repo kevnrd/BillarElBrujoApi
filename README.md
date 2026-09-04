@@ -1,4 +1,4 @@
-# BillarElBrujoApi V5
+# BillarElBrujoApi V6
 
 API ASP.NET Core para Railway + MySQL + Google Sheets.
 
@@ -23,3 +23,7 @@ Google Sheets:
 - GOOGLE_CREDENTIALS_JSON
 
 No subir credenciales a GitHub.
+
+
+## V6
+Corrige el error MySQL ONLY_FULL_GROUP_BY en `/api/sheets/sync`.

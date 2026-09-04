@@ -631,22 +631,35 @@ public sealed class SheetsReporter
             new() { "fecha", "sucursal", "ventas_productos", "cobro_mesas", "total_ingreso", "propinas", "cajero" }
         };
         resumen.AddRange((await db.QueryAsync(con, """
-            SELECT DATE(v.fecha) AS fecha, s.nombre AS sucursal,
-                   SUM(v.total) AS ventas_productos,
-                   0 AS cobro_mesas,
-                   SUM(v.total) AS total_ingreso,
-                   COALESCE((SELECT SUM(p.monto)
-                             FROM propinas p
-                             WHERE p.sucursal_id = v.sucursal_id
-                               AND DATE(p.fecha) = DATE(v.fecha)), 0) AS propinas,
-                   v.cajero
-            FROM ventas v
-            INNER JOIN sucursales s ON s.id = v.sucursal_id
-            GROUP BY DATE(v.fecha), s.nombre, v.cajero, v.sucursal_id
-            ORDER BY DATE(v.fecha), s.nombre, v.cajero;
+            SELECT
+                x.fecha_dia,
+                x.sucursal,
+                x.ventas_productos,
+                x.cobro_mesas,
+                x.total_ingreso,
+                COALESCE(SUM(p.monto), 0) AS propinas,
+                x.cajero
+            FROM (
+                SELECT
+                    DATE(v.fecha) AS fecha_dia,
+                    v.sucursal_id,
+                    s.nombre AS sucursal,
+                    v.cajero,
+                    SUM(v.total) AS ventas_productos,
+                    0 AS cobro_mesas,
+                    SUM(v.total) AS total_ingreso
+                FROM ventas v
+                INNER JOIN sucursales s ON s.id = v.sucursal_id
+                GROUP BY DATE(v.fecha), v.sucursal_id, s.nombre, v.cajero
+            ) x
+            LEFT JOIN propinas p
+                ON p.sucursal_id = x.sucursal_id
+               AND DATE(p.fecha) = x.fecha_dia
+            GROUP BY x.fecha_dia, x.sucursal, x.ventas_productos, x.cobro_mesas, x.total_ingreso, x.cajero
+            ORDER BY x.fecha_dia, x.sucursal, x.cajero;
         """)).Select(r => new List<object>
         {
-            DateOnlyText(r, "fecha"), Text(r, "sucursal"), Val(r, "ventas_productos"),
+            DateOnlyText(r, "fecha_dia"), Text(r, "sucursal"), Val(r, "ventas_productos"),
             Val(r, "cobro_mesas"), Val(r, "total_ingreso"), Val(r, "propinas"), Text(r, "cajero")
         }));
 

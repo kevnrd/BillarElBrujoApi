@@ -1,0 +1,20 @@
+BILLAR EL BRUJO API V6 - FIX GOOGLE SHEETS SYNC
+
+Corrige el error:
+Expression #6 of SELECT list is not in GROUP BY clause...
+sql_mode=only_full_group_by
+
+Qué se corrigió:
+- La consulta SQL de Resumen_Diario ahora usa una subconsulta compatible con MySQL Railway.
+
+Pasos:
+1. Subir/reemplazar en GitHub los archivos de este ZIP.
+2. Volver a Railway.
+3. Presionar Deploy si aparece, o Redeploy.
+4. Esperar Online.
+5. Probar:
+   https://billarelbrujoapi-production.up.railway.app/health
+6. Forzar actualización:
+   https://billarelbrujoapi-production.up.railway.app/api/sheets/sync
+
+Si responde ok=true, el Google Sheets ya se actualizó.

@@ -1,4 +1,4 @@
-# BillarElBrujoApi V6
+# BillarElBrujoApi V7
 
 API ASP.NET Core para Railway + MySQL + Google Sheets.
 
@@ -27,3 +27,7 @@ No subir credenciales a GitHub.
 
 ## V6
 Corrige el error MySQL ONLY_FULL_GROUP_BY en `/api/sheets/sync`.
+
+
+## V7
+`/health` muestra `version: V7_GOOGLE_SHEETS_FIX_SIMPLE` para confirmar que Railway usa el código nuevo.

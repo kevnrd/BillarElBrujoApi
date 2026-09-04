@@ -1,0 +1,24 @@
+BILLAR EL BRUJO API V7 - FIX SIMPLE GOOGLE SHEETS
+
+Esta versión marca /health con:
+version: V7_GOOGLE_SHEETS_FIX_SIMPLE
+
+Corrige el error de /api/sheets/sync quitando la subconsulta conflictiva del Resumen_Diario.
+El Excel actualizará:
+- Ventas
+- Detalle_Ventas
+- Stock
+- Reservas
+- Propinas
+- Resumen_Diario simple
+
+Pasos:
+1. En GitHub reemplaza Program.cs con este Program.cs V7.
+2. También puedes reemplazar los demás archivos.
+3. En Railway presiona el botón morado Deploy si aparece.
+4. Espera Online.
+5. Abre /health y confirma que salga:
+   "version":"V7_GOOGLE_SHEETS_FIX_SIMPLE"
+6. Abre /api/sheets/sync
+
+Si /health NO muestra version V7, Railway sigue usando código viejo.

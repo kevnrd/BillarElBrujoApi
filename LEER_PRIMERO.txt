@@ -1,45 +1,19 @@
-BILLAR EL BRUJO API - Railway + MySQL
+BILLAR EL BRUJO API - V30 CORREGIDO
 
-Esta API se conecta a MySQL usando las variables de Railway:
-MYSQL_URL
-MYSQLHOST
-MYSQLPORT
-MYSQLDATABASE
-MYSQLUSER
-MYSQLPASSWORD
+Esta versión usa .NET 8 para Railway.
 
-No escribas la contraseña dentro del código.
-No compartas capturas donde se vea MYSQLPASSWORD.
+Corrige problemas probables de compilación por .NET 10 en Railway.
 
-PASOS PARA SUBIR A RAILWAY:
-1. Crea un repositorio GitHub llamado BillarElBrujoApi.
-2. Sube todos los archivos de esta carpeta.
-3. En Railway, dentro del mismo proyecto donde está MySQL:
-   New > GitHub Repository > BillarElBrujoApi.
-4. En el servicio de la API, entra a Variables.
-5. Agrega una referencia a las variables del servicio MySQL.
-6. Deploy.
-7. Abre la URL pública de la API.
-8. Prueba:
-   /health
+Archivos que se deben subir a GitHub:
+- Program.cs
+- BillarElBrujoApi.csproj
+- Dockerfile
+- railway.toml
+- appsettings.example.json
+- README.md
+- LEER_PRIMERO.txt
 
-Si /health responde ok=true, la API ya está conectada a MySQL.
-
-ENDPOINTS:
-GET  /
-GET  /health
-POST /api/login
-GET  /api/sucursales
-GET  /api/mesas?sucursalId=1
-GET  /api/productos?sucursalId=1
-POST /api/productos
-POST /api/ventas
-GET  /api/ventas?sucursalId=1
-POST /api/reservas
-POST /api/propinas
-GET  /api/reportes/resumen
-
-USUARIOS INICIALES:
-admin / admin123
-caja1 / caja123
-caja2 / caja123
+No subir:
+- contraseñas
+- credenciales_google.json
+- conexion_railway.txt

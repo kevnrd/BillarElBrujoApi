@@ -1,0 +1,9 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+credenciales_google.json
+conexion_railway.txt
+.env
+*.env

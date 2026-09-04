@@ -1,12 +1,24 @@
 # BillarElBrujoApi
 
-API ASP.NET Core para conectar el programa BILLAR EL BRUJO con MySQL en Railway.
+API ASP.NET Core para conectar el sistema BILLAR EL BRUJO con MySQL en Railway.
 
-Prueba cuando despliegue:
+## Prueba
+
+Cuando esté desplegada en Railway, abrir:
 
 `/health`
 
-Variables necesarias en Railway:
+Debe responder:
+
+```json
+{
+  "ok": true,
+  "database": "railway",
+  "mysql": "conectado"
+}
+```
+
+## Variables necesarias en Railway
 
 - MYSQL_URL
 - MYSQLHOST

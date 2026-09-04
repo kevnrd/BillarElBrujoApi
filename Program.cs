@@ -1,4 +1,3 @@
-using System.Data;
 using MySqlConnector;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -16,6 +15,7 @@ builder.Services.AddCors(options =>
 builder.Services.AddSingleton<Db>();
 
 var app = builder.Build();
+
 app.UseCors("AllowDesktopApp");
 
 app.MapGet("/", () => Results.Ok(new
@@ -32,7 +32,13 @@ app.MapGet("/health", async (Db db) =>
         await using var con = await db.OpenAsync();
         await using var cmd = new MySqlCommand("SELECT DATABASE();", con);
         var database = Convert.ToString(await cmd.ExecuteScalarAsync());
-        return Results.Ok(new { ok = true, database });
+
+        return Results.Ok(new
+        {
+            ok = true,
+            database,
+            mysql = "conectado"
+        });
     }
     catch (Exception ex)
     {
@@ -65,7 +71,7 @@ app.MapPost("/api/login", async (Db db, LoginRequest req) =>
         id = rd.GetInt32("id"),
         usuario = rd.GetString("usuario"),
         rol = rd.GetString("rol"),
-        sucursal = rd.IsDBNull("sucursal") ? "TODAS" : rd.GetString("sucursal")
+        sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "TODAS" : rd.GetString("sucursal")
     });
 });
 
@@ -101,8 +107,8 @@ app.MapGet("/api/productos", async (Db db, int? sucursalId) =>
     await using var con = await db.OpenAsync();
 
     const string sql = """
-        SELECT p.id, p.sucursal_id, s.nombre AS sucursal, p.nombre, p.categoria, p.unidad_base,
-               p.stock_actual, p.stock_minimo, p.estado
+        SELECT p.id, p.sucursal_id, s.nombre AS sucursal, p.nombre, p.categoria,
+               p.unidad_base, p.stock_actual, p.stock_minimo, p.estado
         FROM productos p
         INNER JOIN sucursales s ON s.id = p.sucursal_id
         WHERE (@sucursalId IS NULL OR p.sucursal_id = @sucursalId)
@@ -196,7 +202,11 @@ app.MapPost("/api/ventas", async (Db db, VentaRequest venta) =>
             detCmd.Parameters.AddWithValue("@subtotal", d.Subtotal);
             await detCmd.ExecuteNonQueryAsync();
 
-            await using var stockCmd = new MySqlCommand("UPDATE productos SET stock_actual = stock_actual - @cantidad_base WHERE id = @producto_id;", con, tx);
+            await using var stockCmd = new MySqlCommand("""
+                UPDATE productos
+                SET stock_actual = stock_actual - @cantidad_base
+                WHERE id = @producto_id;
+            """, con, tx);
             stockCmd.Parameters.AddWithValue("@cantidad_base", d.CantidadBase);
             stockCmd.Parameters.AddWithValue("@producto_id", d.ProductoId);
             await stockCmd.ExecuteNonQueryAsync();
@@ -283,7 +293,7 @@ app.MapPost("/api/propinas", async (Db db, PropinaRequest p) =>
 
     await using var cmd = new MySqlCommand(sql, con);
     cmd.Parameters.AddWithValue("@sucursal_id", p.SucursalId);
-    cmd.Parameters.AddWithValue("@mesa_id", p.MesaId);
+    cmd.Parameters.AddWithValue("@mesa_id", p.MesaId.HasValue ? p.MesaId.Value : DBNull.Value);
     cmd.Parameters.AddWithValue("@mesera", p.Mesera);
     cmd.Parameters.AddWithValue("@cajero", p.Cajero);
     cmd.Parameters.AddWithValue("@fecha", p.Fecha);
@@ -298,7 +308,7 @@ app.MapGet("/api/reportes/resumen", async (Db db) =>
 {
     await using var con = await db.OpenAsync();
 
-    const string porSucursalSql = """
+    const string sql = """
         SELECT
             s.nombre AS sucursal,
             COALESCE(SUM(v.total), 0) AS total_ventas,
@@ -309,7 +319,7 @@ app.MapGet("/api/reportes/resumen", async (Db db) =>
         ORDER BY s.id;
     """;
 
-    var porSucursal = await db.QueryAsync(con, porSucursalSql);
+    var porSucursal = await db.QueryAsync(con, sql);
 
     const string totalSql = """
         SELECT
@@ -351,17 +361,21 @@ public sealed class Db
         if (parameters != null)
         {
             foreach (var p in parameters)
+            {
                 cmd.Parameters.AddWithValue(p.Key, p.Value ?? DBNull.Value);
+            }
         }
 
         var rows = new List<Dictionary<string, object?>>();
-
         await using var rd = await cmd.ExecuteReaderAsync();
+
         while (await rd.ReadAsync())
         {
             var item = new Dictionary<string, object?>();
             for (int i = 0; i < rd.FieldCount; i++)
+            {
                 item[rd.GetName(i)] = rd.IsDBNull(i) ? null : rd.GetValue(i);
+            }
             rows.Add(item);
         }
 
@@ -370,26 +384,42 @@ public sealed class Db
 
     private static string BuildConnectionString(IConfiguration configuration)
     {
-        string? full = Environment.GetEnvironmentVariable("MYSQL_URL");
+        string? fullUrl = Environment.GetEnvironmentVariable("MYSQL_URL");
 
-        if (!string.IsNullOrWhiteSpace(full))
+        if (!string.IsNullOrWhiteSpace(fullUrl))
         {
-            var uri = new Uri(full);
-            string[] userInfo = uri.UserInfo.Split(':', 2);
-            string user = Uri.UnescapeDataString(userInfo[0]);
-            string password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
-            string database = uri.AbsolutePath.TrimStart('/');
+            var uri = new Uri(fullUrl);
+            string[] mysqlUserInfo = uri.UserInfo.Split(':', 2);
+            string mysqlUserFromUrl = Uri.UnescapeDataString(mysqlUserInfo[0]);
+            string mysqlPasswordFromUrl = mysqlUserInfo.Length > 1 ? Uri.UnescapeDataString(mysqlUserInfo[1]) : "";
+            string mysqlDatabaseFromUrl = uri.AbsolutePath.TrimStart('/');
 
-            return $"Server={uri.Host};Port={uri.Port};Database={database};Uid={user};Pwd={password};SslMode=Preferred;";
+            return $"Server={uri.Host};Port={uri.Port};Database={mysqlDatabaseFromUrl};Uid={mysqlUserFromUrl};Pwd={mysqlPasswordFromUrl};SslMode=Preferred;";
         }
 
-        string host = Environment.GetEnvironmentVariable("MYSQLHOST") ?? configuration["MYSQLHOST"] ?? "localhost";
-        string port = Environment.GetEnvironmentVariable("MYSQLPORT") ?? configuration["MYSQLPORT"] ?? "3306";
-        string databaseName = Environment.GetEnvironmentVariable("MYSQLDATABASE") ?? Environment.GetEnvironmentVariable("MYSQL_DATABASE") ?? configuration["MYSQLDATABASE"] ?? configuration["MYSQL_DATABASE"] ?? "railway";
-        string user = Environment.GetEnvironmentVariable("MYSQLUSER") ?? configuration["MYSQLUSER"] ?? "root";
-        string password = Environment.GetEnvironmentVariable("MYSQLPASSWORD") ?? configuration["MYSQLPASSWORD"] ?? "";
+        string mysqlHost = Environment.GetEnvironmentVariable("MYSQLHOST")
+            ?? configuration["MYSQLHOST"]
+            ?? "localhost";
 
-        return $"Server={host};Port={port};Database={databaseName};Uid={user};Pwd={password};SslMode=Preferred;";
+        string mysqlPort = Environment.GetEnvironmentVariable("MYSQLPORT")
+            ?? configuration["MYSQLPORT"]
+            ?? "3306";
+
+        string mysqlDatabaseName = Environment.GetEnvironmentVariable("MYSQLDATABASE")
+            ?? Environment.GetEnvironmentVariable("MYSQL_DATABASE")
+            ?? configuration["MYSQLDATABASE"]
+            ?? configuration["MYSQL_DATABASE"]
+            ?? "railway";
+
+        string mysqlUserName = Environment.GetEnvironmentVariable("MYSQLUSER")
+            ?? configuration["MYSQLUSER"]
+            ?? "root";
+
+        string mysqlPasswordValue = Environment.GetEnvironmentVariable("MYSQLPASSWORD")
+            ?? configuration["MYSQLPASSWORD"]
+            ?? "";
+
+        return $"Server={mysqlHost};Port={mysqlPort};Database={mysqlDatabaseName};Uid={mysqlUserName};Pwd={mysqlPasswordValue};SslMode=Preferred;";
     }
 }
 

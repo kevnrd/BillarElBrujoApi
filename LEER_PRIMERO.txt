@@ -1,10 +1,10 @@
-BILLAR EL BRUJO API - V30 CORREGIDO
+BILLAR EL BRUJO API - V4 FIX BUILD
 
-Esta versión usa .NET 8 para Railway.
+Corrige:
+1. Error CS0136 por variables repetidas user/password.
+2. Warning de Dockerfile por variable PORT no definida en ENV.
 
-Corrige problemas probables de compilación por .NET 10 en Railway.
-
-Archivos que se deben subir a GitHub:
+Subir a GitHub reemplazando los archivos viejos:
 - Program.cs
 - BillarElBrujoApi.csproj
 - Dockerfile
@@ -12,8 +12,4 @@ Archivos que se deben subir a GitHub:
 - appsettings.example.json
 - README.md
 - LEER_PRIMERO.txt
-
-No subir:
-- contraseñas
-- credenciales_google.json
-- conexion_railway.txt
+- verificar_mysql.sql

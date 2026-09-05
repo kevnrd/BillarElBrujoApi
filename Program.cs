@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V7_GOOGLE_SHEETS_FIX_SIMPLE",
+            version = "V8_SYNC_ROBUSTO_PRODUCTOS",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -238,6 +238,46 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 
         foreach (var d in venta.Detalle)
         {
+            long productoId = d.ProductoId <= 0 ? Math.Abs((d.Producto ?? "PRODUCTO").GetHashCode()) : d.ProductoId;
+            long presentacionId = d.PresentacionId <= 0 ? Math.Abs(((d.Producto ?? "") + "-" + (d.Presentacion ?? "")).GetHashCode()) : d.PresentacionId;
+
+            // Garantiza que el producto exista en Railway antes de insertar el detalle.
+            // Esto evita fallas por llaves foráneas cuando la PC local tiene productos
+            // pero MySQL Railway fue limpiado para la entrega.
+            await using (var prodCmd = new MySqlCommand("""
+                INSERT INTO productos (id, sucursal_id, nombre, categoria, unidad_base, stock_actual, stock_minimo, estado)
+                VALUES (@id, @sucursal_id, @nombre, 'General', 'UNIDAD', 0, 0, 'ACTIVO')
+                ON DUPLICATE KEY UPDATE
+                    nombre = VALUES(nombre),
+                    sucursal_id = VALUES(sucursal_id),
+                    estado = 'ACTIVO';
+            """, con, tx))
+            {
+                prodCmd.Parameters.AddWithValue("@id", productoId);
+                prodCmd.Parameters.AddWithValue("@sucursal_id", venta.SucursalId);
+                prodCmd.Parameters.AddWithValue("@nombre", string.IsNullOrWhiteSpace(d.Producto) ? "Producto" : d.Producto);
+                await prodCmd.ExecuteNonQueryAsync();
+            }
+
+            await using (var presCmd = new MySqlCommand("""
+                INSERT INTO presentaciones (id, producto_id, nombre, cantidad_base, precio_venta, estado)
+                VALUES (@id, @producto_id, @nombre, @cantidad_base, @precio_venta, 'ACTIVO')
+                ON DUPLICATE KEY UPDATE
+                    producto_id = VALUES(producto_id),
+                    nombre = VALUES(nombre),
+                    cantidad_base = VALUES(cantidad_base),
+                    precio_venta = VALUES(precio_venta),
+                    estado = 'ACTIVO';
+            """, con, tx))
+            {
+                presCmd.Parameters.AddWithValue("@id", presentacionId);
+                presCmd.Parameters.AddWithValue("@producto_id", productoId);
+                presCmd.Parameters.AddWithValue("@nombre", string.IsNullOrWhiteSpace(d.Presentacion) ? "Unidad" : d.Presentacion);
+                presCmd.Parameters.AddWithValue("@cantidad_base", d.CantidadBase <= 0 ? d.Cantidad : d.CantidadBase);
+                presCmd.Parameters.AddWithValue("@precio_venta", d.PrecioUnitario);
+                await presCmd.ExecuteNonQueryAsync();
+            }
+
             const string detalleSql = """
                 INSERT INTO detalle_ventas
                 (venta_id, producto_id, presentacion_id, producto, presentacion, cantidad, precio_unitario, subtotal)
@@ -247,8 +287,8 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 
             await using var detCmd = new MySqlCommand(detalleSql, con, tx);
             detCmd.Parameters.AddWithValue("@venta_id", ventaId);
-            detCmd.Parameters.AddWithValue("@producto_id", d.ProductoId);
-            detCmd.Parameters.AddWithValue("@presentacion_id", d.PresentacionId);
+            detCmd.Parameters.AddWithValue("@producto_id", productoId);
+            detCmd.Parameters.AddWithValue("@presentacion_id", presentacionId);
             detCmd.Parameters.AddWithValue("@producto", d.Producto);
             detCmd.Parameters.AddWithValue("@presentacion", d.Presentacion);
             detCmd.Parameters.AddWithValue("@cantidad", d.Cantidad);
@@ -261,8 +301,8 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
                 SET stock_actual = stock_actual - @cantidad_base
                 WHERE id = @producto_id;
             """, con, tx);
-            stockCmd.Parameters.AddWithValue("@cantidad_base", d.CantidadBase);
-            stockCmd.Parameters.AddWithValue("@producto_id", d.ProductoId);
+            stockCmd.Parameters.AddWithValue("@cantidad_base", d.CantidadBase <= 0 ? d.Cantidad : d.CantidadBase);
+            stockCmd.Parameters.AddWithValue("@producto_id", productoId);
             await stockCmd.ExecuteNonQueryAsync();
         }
 

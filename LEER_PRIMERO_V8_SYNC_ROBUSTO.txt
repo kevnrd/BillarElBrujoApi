@@ -1,0 +1,10 @@
+BILLAR EL BRUJO API - V8 SYNC ROBUSTO
+
+Corrección:
+- La API ahora permite recibir ventas aunque MySQL Railway haya sido limpiado y no tenga productos/presentaciones.
+- Antes podía fallar por llaves foráneas en detalle_ventas.
+- Ahora, antes de insertar detalle_ventas, crea/asegura el producto y la presentación necesarios.
+- Mantiene sincronización automática hacia Google Sheets usando TrySyncSheets.
+
+Después de subir esta versión a Railway:
+- /health debe mostrar version V8_SYNC_ROBUSTO_PRODUCTOS

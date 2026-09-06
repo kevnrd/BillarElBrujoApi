@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V13_REPORTES_EXCEL_FINAL",
+            version = "V14_FIX_RAILWAY_DEPLOY",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -1152,7 +1152,7 @@ public sealed class SheetsReporter
         {
             new() { "fecha", "sucursal", "productos_vendidos", "uso_y_cobro_mesas", "total_ingreso", "ayuda_comida", "uso_interno", "perdidas", "neto_para_revisar" }
         };
-        gananciaNegocio.AddRange(resumen.Select((r, idx) => idx == 0 ? null : new List<object> { r[0], r[1], r[2], r[3], r[4], 0, 0, 0, r[4] }).Where(r => r != null)!);
+        gananciaNegocio.AddRange(resumen.Skip(1).Select(r => new List<object> { r[0], r[1], r[2], r[3], r[4], 0, 0, 0, r[4] }));
 
         await ReplaceSheetAsync(service, "Ventas", ventas);
         await ReplaceSheetAsync(service, "Detalle_Ventas", detalle);

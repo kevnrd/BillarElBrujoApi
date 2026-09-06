@@ -1,0 +1,9 @@
+BILLAR EL BRUJO API - V14 FIX RAILWAY DEPLOY
+
+Corrección:
+- Corrige una línea de reportes que podía fallar al compilar en Railway.
+- Mantiene mesas en vivo.
+- Mantiene reportes y hojas nuevas de Google Sheets.
+- /health debe mostrar: V14_FIX_RAILWAY_DEPLOY
+
+Sube este ZIP a GitHub/Railway reemplazando los archivos de la API.

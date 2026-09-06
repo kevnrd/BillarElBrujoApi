@@ -1,0 +1,11 @@
+BILLAR EL BRUJO API - V15 FIX INIT SHEETS
+
+Corrección:
+- Corrige error Railway:
+  CS0103: El nombre 'InitSheetIfEmptyAsync' no existe en el contexto actual.
+- Mantiene reportes nuevos de Google Sheets.
+- Mantiene mesas en vivo.
+- /health debe mostrar:
+  V15_FIX_INIT_SHEETS
+
+Subir este ZIP a GitHub/Railway reemplazando los archivos de la API.

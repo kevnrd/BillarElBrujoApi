@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V14_FIX_RAILWAY_DEPLOY",
+            version = "V15_FIX_INIT_SHEETS",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -1224,6 +1224,28 @@ public sealed class SheetsReporter
         };
 
         await service.Spreadsheets.BatchUpdate(batch, _sheetId).ExecuteAsync();
+    }
+
+
+    private async Task InitSheetIfEmptyAsync(SheetsService service, string sheetName, List<object> headers)
+    {
+        string escaped = "'" + sheetName.Replace("'", "''") + "'!A1:Z2";
+        var get = service.Spreadsheets.Values.Get(_sheetId, escaped);
+        var existing = await get.ExecuteAsync();
+
+        if (existing.Values != null && existing.Values.Count > 0 && existing.Values[0].Count > 0)
+            return;
+
+        List<IList<object>> values = new List<IList<object>>
+        {
+            headers,
+            headers.Select(_ => (object)"").ToList()
+        };
+
+        var body = new ValueRange { Values = values };
+        var update = service.Spreadsheets.Values.Update(body, _sheetId, "'" + sheetName.Replace("'", "''") + "'!A1");
+        update.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
+        await update.ExecuteAsync();
     }
 
     private async Task ReplaceSheetAsync(SheetsService service, string sheetName, List<List<object>> values)

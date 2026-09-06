@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V8_SYNC_ROBUSTO_PRODUCTOS",
+            version = "V9_COBROS_REPORTES_CAJA",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -102,7 +102,7 @@ app.MapPost("/api/login", async (Db db, LoginRequest req) =>
     await using var con = await db.OpenAsync();
 
     const string sql = """
-        SELECT u.id, u.usuario, u.rol, u.estado, s.nombre AS sucursal
+        SELECT u.id, u.usuario, u.rol, u.estado, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal
         FROM usuarios u
         LEFT JOIN sucursales s ON s.id = u.sucursal_id
         WHERE u.usuario = @usuario AND u.clave = @clave AND u.estado = 'ACTIVO'
@@ -138,7 +138,7 @@ app.MapGet("/api/mesas", async (Db db, int? sucursalId) =>
     await using var con = await db.OpenAsync();
 
     const string sql = """
-        SELECT m.id, m.sucursal_id, s.nombre AS sucursal, m.nombre, m.precio_hora, m.estado
+        SELECT m.id, m.sucursal_id, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, m.nombre, m.precio_hora, m.estado
         FROM mesas m
         INNER JOIN sucursales s ON s.id = m.sucursal_id
         WHERE (@sucursalId IS NULL OR m.sucursal_id = @sucursalId)
@@ -158,7 +158,7 @@ app.MapGet("/api/productos", async (Db db, int? sucursalId) =>
     await using var con = await db.OpenAsync();
 
     const string sql = """
-        SELECT p.id, p.sucursal_id, s.nombre AS sucursal, p.nombre, p.categoria,
+        SELECT p.id, p.sucursal_id, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, p.nombre, p.categoria,
                p.unidad_base, p.stock_actual, p.stock_minimo, p.estado
         FROM productos p
         INNER JOIN sucursales s ON s.id = p.sucursal_id
@@ -298,7 +298,7 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 
             await using var stockCmd = new MySqlCommand("""
                 UPDATE productos
-                SET stock_actual = stock_actual - @cantidad_base
+                SET stock_actual = GREATEST(stock_actual - @cantidad_base, 0)
                 WHERE id = @producto_id;
             """, con, tx);
             stockCmd.Parameters.AddWithValue("@cantidad_base", d.CantidadBase <= 0 ? d.Cantidad : d.CantidadBase);
@@ -324,7 +324,7 @@ app.MapGet("/api/ventas", async (Db db, int? sucursalId) =>
     await using var con = await db.OpenAsync();
 
     const string sql = """
-        SELECT v.id, v.sucursal_id, s.nombre AS sucursal, v.cajero, v.fecha,
+        SELECT v.id, v.sucursal_id, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, v.cajero, v.fecha,
                v.tipo, v.metodo_pago, v.total, v.sync_key
         FROM ventas v
         INNER JOIN sucursales s ON s.id = v.sucursal_id
@@ -339,6 +339,74 @@ app.MapGet("/api/ventas", async (Db db, int? sucursalId) =>
     });
 
     return Results.Ok(rows);
+});
+
+
+app.MapPost("/api/cobros-mesa", async (Db db, SheetsReporter sheets, CobroMesaRequest c) =>
+{
+    await using var con = await db.OpenAsync();
+
+    await using (var create = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS cobros_mesa (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            sucursal_id INT NOT NULL,
+            session_id INT NULL,
+            mesa_id INT NULL,
+            mesa VARCHAR(100) NOT NULL,
+            cajero VARCHAR(100) NOT NULL,
+            mesera VARCHAR(150) NULL,
+            fecha DATETIME NOT NULL,
+            tiempo VARCHAR(50) NULL,
+            total_mesa DECIMAL(10,2) NOT NULL DEFAULT 0,
+            total_consumo DECIMAL(10,2) NOT NULL DEFAULT 0,
+            total_cobrado DECIMAL(10,2) NOT NULL DEFAULT 0,
+            metodo_pago VARCHAR(50) NOT NULL,
+            sync_key VARCHAR(180) NOT NULL UNIQUE
+        );
+    """, con))
+    {
+        await create.ExecuteNonQueryAsync();
+    }
+
+    string syncKey = string.IsNullOrWhiteSpace(c.SyncKey) ? Guid.NewGuid().ToString("N") : c.SyncKey;
+
+    const string sql = """
+        INSERT INTO cobros_mesa
+        (sucursal_id, session_id, mesa_id, mesa, cajero, mesera, fecha, tiempo, total_mesa, total_consumo, total_cobrado, metodo_pago, sync_key)
+        VALUES
+        (@sucursal_id, @session_id, @mesa_id, @mesa, @cajero, @mesera, @fecha, @tiempo, @total_mesa, @total_consumo, @total_cobrado, @metodo_pago, @sync_key)
+        ON DUPLICATE KEY UPDATE
+            mesa = VALUES(mesa),
+            cajero = VALUES(cajero),
+            mesera = VALUES(mesera),
+            fecha = VALUES(fecha),
+            tiempo = VALUES(tiempo),
+            total_mesa = VALUES(total_mesa),
+            total_consumo = VALUES(total_consumo),
+            total_cobrado = VALUES(total_cobrado),
+            metodo_pago = VALUES(metodo_pago);
+    """;
+
+    await using var cmd = new MySqlCommand(sql, con);
+    cmd.Parameters.AddWithValue("@sucursal_id", c.SucursalId);
+    cmd.Parameters.AddWithValue("@session_id", c.SessionId.HasValue ? c.SessionId.Value : DBNull.Value);
+    cmd.Parameters.AddWithValue("@mesa_id", c.MesaId.HasValue ? c.MesaId.Value : DBNull.Value);
+    cmd.Parameters.AddWithValue("@mesa", c.Mesa ?? "");
+    cmd.Parameters.AddWithValue("@cajero", c.Cajero ?? "");
+    cmd.Parameters.AddWithValue("@mesera", c.Mesera ?? "");
+    cmd.Parameters.AddWithValue("@fecha", c.Fecha);
+    cmd.Parameters.AddWithValue("@tiempo", c.Tiempo ?? "");
+    cmd.Parameters.AddWithValue("@total_mesa", c.TotalMesa);
+    cmd.Parameters.AddWithValue("@total_consumo", c.TotalConsumo);
+    cmd.Parameters.AddWithValue("@total_cobrado", c.TotalCobrado);
+    cmd.Parameters.AddWithValue("@metodo_pago", c.MetodoPago ?? "");
+    cmd.Parameters.AddWithValue("@sync_key", syncKey);
+
+    await cmd.ExecuteNonQueryAsync();
+
+    await TrySyncSheets(db, sheets);
+
+    return Results.Ok(new { ok = true, syncKey });
 });
 
 app.MapPost("/api/reservas", async (Db db, SheetsReporter sheets, ReservaRequest r) =>
@@ -413,7 +481,7 @@ app.MapGet("/api/reportes/resumen", async (Db db) =>
 
     const string sql = """
         SELECT
-            s.nombre AS sucursal,
+            CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
             COALESCE(SUM(v.total), 0) AS total_ventas,
             COUNT(v.id) AS cantidad_ventas
         FROM sucursales s
@@ -583,7 +651,7 @@ public sealed class SheetsReporter
             new() { "id_venta", "fecha", "hora", "sucursal", "cajero", "tipo", "metodo_pago", "total", "sincronizado" }
         };
         ventas.AddRange((await db.QueryAsync(con, """
-            SELECT v.id, DATE(v.fecha) AS fecha, TIME(v.fecha) AS hora, s.nombre AS sucursal,
+            SELECT v.id, DATE(v.fecha) AS fecha, TIME(v.fecha) AS hora, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
                    v.cajero, v.tipo, v.metodo_pago, v.total
             FROM ventas v
             INNER JOIN sucursales s ON s.id = v.sucursal_id
@@ -599,7 +667,7 @@ public sealed class SheetsReporter
             new() { "id_venta", "sucursal", "cajero", "producto", "presentacion", "cantidad", "precio", "subtotal" }
         };
         detalle.AddRange((await db.QueryAsync(con, """
-            SELECT d.venta_id, s.nombre AS sucursal, v.cajero, d.producto, d.presentacion,
+            SELECT d.venta_id, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, v.cajero, d.producto, d.presentacion,
                    d.cantidad, d.precio_unitario, d.subtotal
             FROM detalle_ventas d
             INNER JOIN ventas v ON v.id = d.venta_id
@@ -615,15 +683,28 @@ public sealed class SheetsReporter
         {
             new() { "id_sesion", "fecha", "hora", "sucursal", "mesa", "cajero", "mesera", "tiempo", "total_mesa", "total_consumo", "total_cobrado", "metodo_pago" }
         };
+        cobrosMesa.AddRange((await db.QueryAsync(con, """
+            SELECT c.session_id, DATE(c.fecha) AS fecha, TIME(c.fecha) AS hora,
+                   CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+                   c.mesa, c.cajero, c.mesera, c.tiempo, c.total_mesa, c.total_consumo, c.total_cobrado, c.metodo_pago
+            FROM cobros_mesa c
+            INNER JOIN sucursales s ON s.id = c.sucursal_id
+            ORDER BY c.fecha, c.id;
+        """)).Select(r => new List<object>
+        {
+            Val(r, "session_id"), DateOnlyText(r, "fecha"), Text(r, "hora"), Text(r, "sucursal"),
+            Text(r, "mesa"), Text(r, "cajero"), Text(r, "mesera"), Text(r, "tiempo"),
+            Val(r, "total_mesa"), Val(r, "total_consumo"), Val(r, "total_cobrado"), Text(r, "metodo_pago")
+        }));
 
         List<List<object>> stock = new()
         {
             new() { "id_producto", "sucursal", "producto", "categoria", "stock_actual", "stock_minimo", "unidad_base", "alerta" }
         };
         stock.AddRange((await db.QueryAsync(con, """
-            SELECT p.id, s.nombre AS sucursal, p.nombre, p.categoria, p.stock_actual,
+            SELECT p.id, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, p.nombre, p.categoria, GREATEST(p.stock_actual, 0) AS stock_actual,
                    p.stock_minimo, p.unidad_base,
-                   CASE WHEN p.stock_actual <= p.stock_minimo THEN 'BAJO' ELSE 'OK' END AS alerta
+                   CASE WHEN GREATEST(p.stock_actual, 0) <= p.stock_minimo THEN 'BAJO' ELSE 'OK' END AS alerta
             FROM productos p
             INNER JOIN sucursales s ON s.id = p.sucursal_id
             ORDER BY s.id, p.nombre;
@@ -639,7 +720,7 @@ public sealed class SheetsReporter
         };
         reservas.AddRange((await db.QueryAsync(con, """
             SELECT r.id, DATE(r.fecha_reserva) AS fecha, TIME(r.fecha_reserva) AS hora,
-                   s.nombre AS sucursal, m.nombre AS mesa, r.cliente, r.celular, r.minutos, r.estado
+                   CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, m.nombre AS mesa, r.cliente, r.celular, r.minutos, r.estado
             FROM reservas r
             INNER JOIN sucursales s ON s.id = r.sucursal_id
             INNER JOIN mesas m ON m.id = r.mesa_id
@@ -655,7 +736,7 @@ public sealed class SheetsReporter
             new() { "fecha", "hora", "sucursal", "mesa", "mesera", "monto", "cajero" }
         };
         propinas.AddRange((await db.QueryAsync(con, """
-            SELECT DATE(p.fecha) AS fecha, TIME(p.fecha) AS hora, s.nombre AS sucursal,
+            SELECT DATE(p.fecha) AS fecha, TIME(p.fecha) AS hora, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
                    COALESCE(m.nombre, '') AS mesa, p.mesera, p.monto, p.cajero
             FROM propinas p
             INNER JOIN sucursales s ON s.id = p.sucursal_id
@@ -673,17 +754,38 @@ public sealed class SheetsReporter
         };
         resumen.AddRange((await db.QueryAsync(con, """
             SELECT
-                DATE(v.fecha) AS fecha_dia,
-                s.nombre AS sucursal,
-                SUM(v.total) AS ventas_productos,
-                0 AS cobro_mesas,
-                SUM(v.total) AS total_ingreso,
-                0 AS propinas,
-                v.cajero
-            FROM ventas v
-            INNER JOIN sucursales s ON s.id = v.sucursal_id
-            GROUP BY DATE(v.fecha), s.nombre, v.cajero
-            ORDER BY DATE(v.fecha), s.nombre, v.cajero;
+                x.fecha_dia,
+                x.sucursal,
+                SUM(x.productos) AS ventas_productos,
+                SUM(x.mesa) AS cobro_mesas,
+                SUM(x.total) AS total_ingreso,
+                COALESCE((
+                    SELECT SUM(p.monto)
+                    FROM propinas p
+                    INNER JOIN sucursales sp ON sp.id = p.sucursal_id
+                    WHERE DATE(p.fecha) = x.fecha_dia
+                      AND p.cajero = x.cajero
+                      AND (CASE WHEN sp.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END) = x.sucursal
+                ), 0) AS propinas,
+                x.cajero
+            FROM (
+                SELECT
+                    DATE(v.fecha) AS fecha_dia,
+                    CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+                    v.cajero,
+                    v.tipo,
+                    v.total,
+                    COALESCE((SELECT SUM(d.subtotal) FROM detalle_ventas d WHERE d.venta_id = v.id), 0) AS productos,
+                    CASE
+                        WHEN v.tipo = 'MESA'
+                        THEN GREATEST(v.total - COALESCE((SELECT SUM(d2.subtotal) FROM detalle_ventas d2 WHERE d2.venta_id = v.id), 0), 0)
+                        ELSE 0
+                    END AS mesa
+                FROM ventas v
+                INNER JOIN sucursales s ON s.id = v.sucursal_id
+            ) x
+            GROUP BY x.fecha_dia, x.sucursal, x.cajero
+            ORDER BY x.fecha_dia, x.sucursal, x.cajero;
         """)).Select(r => new List<object>
         {
             DateOnlyText(r, "fecha_dia"), Text(r, "sucursal"), Val(r, "ventas_productos"),
@@ -821,6 +923,22 @@ public record VentaRequest(
     decimal Total,
     string? SyncKey,
     List<VentaDetalleRequest> Detalle
+);
+
+public record CobroMesaRequest(
+    int SucursalId,
+    int? SessionId,
+    int? MesaId,
+    string? Mesa,
+    string? Cajero,
+    string? Mesera,
+    DateTime Fecha,
+    string? Tiempo,
+    decimal TotalMesa,
+    decimal TotalConsumo,
+    decimal TotalCobrado,
+    string? MetodoPago,
+    string? SyncKey
 );
 
 public record ReservaRequest(

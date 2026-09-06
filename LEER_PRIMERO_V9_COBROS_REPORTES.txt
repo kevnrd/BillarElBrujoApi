@@ -1,0 +1,11 @@
+BILLAR EL BRUJO API - V9 COBROS Y REPORTES
+
+Cambios:
+- Agrega endpoint /api/cobros-mesa.
+- La pestaña Cobros_Mesa ya se llena desde MySQL.
+- Resumen_Diario separa ventas_productos y cobro_mesas.
+- Los nombres de sucursal salen como PRIMERA SUCURSAL / SEGUNDA SUCURSAL.
+- Stock ya no baja de cero al descontar.
+- /health debe mostrar V9_COBROS_REPORTES_CAJA.
+
+Subir estos archivos a GitHub/Railway y esperar deploy.

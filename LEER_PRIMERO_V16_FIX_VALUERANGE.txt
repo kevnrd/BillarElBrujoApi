@@ -1,0 +1,12 @@
+BILLAR EL BRUJO API - V16 FIX VALUERANGE
+
+Corrección:
+- Corrige error Railway:
+  CS0246: No se pudo encontrar el tipo o espacio de nombres 'ValueRange'.
+- Se usa Google.Apis.Sheets.v4.Data.ValueRange con nombre completo.
+- Mantiene mesas en vivo.
+- Mantiene reportes nuevos y hojas editables en Google Sheets.
+- /health debe mostrar:
+  V16_FIX_VALUERANGE
+
+Subir este ZIP a GitHub/Railway reemplazando los archivos de la API.

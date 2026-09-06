@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V15_FIX_INIT_SHEETS",
+            version = "V16_FIX_VALUERANGE",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -1242,7 +1242,7 @@ public sealed class SheetsReporter
             headers.Select(_ => (object)"").ToList()
         };
 
-        var body = new ValueRange { Values = values };
+        var body = new Google.Apis.Sheets.v4.Data.ValueRange { Values = values };
         var update = service.Spreadsheets.Values.Update(body, _sheetId, "'" + sheetName.Replace("'", "''") + "'!A1");
         update.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
         await update.ExecuteAsync();

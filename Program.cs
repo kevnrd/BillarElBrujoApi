@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V12_FIX_DEPLOY_MESAS_EN_VIVO",
+            version = "V13_REPORTES_EXCEL_FINAL",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -886,7 +886,18 @@ public sealed class SheetsReporter
             "Stock",
             "Reservas",
             "Propinas",
-            "Resumen_Diario"
+            "Resumen_Diario",
+            "Resumen_Turno",
+            "Dinero_Turno",
+            "Ventas_Cada_Cajero",
+            "Como_Pagaron_Clientes",
+            "Ganancia_Negocio",
+            "Empleados_Turnos",
+            "Ayuda_Comida_Empleados",
+            "Ingreso_Mercaderia",
+            "Productos_Usados_Sin_Venta",
+            "Productos_Perdidos_Danados",
+            "Historial_Productos"
         });
 
         await using var con = await db.OpenAsync();
@@ -1037,6 +1048,112 @@ public sealed class SheetsReporter
             Val(r, "cobro_mesas"), Val(r, "total_ingreso"), Val(r, "propinas"), Text(r, "cajero")
         }));
 
+        List<List<object>> resumenTurno = new()
+        {
+            new() { "fecha", "turno", "sucursal", "cajero", "dinero_vendido", "efectivo", "qr", "tarjeta", "transferencia", "productos_vendidos", "uso_y_cobro_mesas", "propinas", "ayuda_comida_empleados", "productos_usados_sin_venta", "productos_perdidos_o_danados", "dinero_neto_para_revisar", "observaciones" }
+        };
+        resumenTurno.AddRange((await db.QueryAsync(con, """
+            SELECT
+                x.fecha_dia,
+                x.turno,
+                x.sucursal,
+                x.cajero,
+                SUM(x.total) AS dinero_vendido,
+                SUM(CASE WHEN UPPER(x.metodo_pago) = 'EFECTIVO' THEN x.total ELSE 0 END) AS efectivo,
+                SUM(CASE WHEN UPPER(x.metodo_pago) = 'QR' THEN x.total ELSE 0 END) AS qr,
+                SUM(CASE WHEN UPPER(x.metodo_pago) = 'TARJETA' THEN x.total ELSE 0 END) AS tarjeta,
+                SUM(CASE WHEN UPPER(x.metodo_pago) = 'TRANSFERENCIA' THEN x.total ELSE 0 END) AS transferencia,
+                SUM(x.productos) AS productos_vendidos,
+                SUM(x.mesa) AS uso_y_cobro_mesas,
+                COALESCE((
+                    SELECT SUM(p.monto)
+                    FROM propinas p
+                    INNER JOIN sucursales sp ON sp.id = p.sucursal_id
+                    WHERE DATE(p.fecha) = x.fecha_dia
+                      AND (CASE WHEN HOUR(p.fecha) < 16 THEN 'MAÑANA' ELSE 'NOCHE' END) = x.turno
+                      AND (CASE WHEN sp.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END) = x.sucursal
+                      AND p.cajero = x.cajero
+                ), 0) AS propinas
+            FROM (
+                SELECT
+                    DATE(v.fecha) AS fecha_dia,
+                    CASE WHEN HOUR(v.fecha) < 16 THEN 'MAÑANA' ELSE 'NOCHE' END AS turno,
+                    CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+                    v.cajero,
+                    v.metodo_pago,
+                    v.tipo,
+                    v.total,
+                    COALESCE((SELECT SUM(d.subtotal) FROM detalle_ventas d WHERE d.venta_id = v.id), 0) AS productos,
+                    CASE
+                        WHEN v.tipo = 'MESA'
+                        THEN GREATEST(v.total - COALESCE((SELECT SUM(d2.subtotal) FROM detalle_ventas d2 WHERE d2.venta_id = v.id), 0), 0)
+                        ELSE 0
+                    END AS mesa
+                FROM ventas v
+                INNER JOIN sucursales s ON s.id = v.sucursal_id
+            ) x
+            GROUP BY x.fecha_dia, x.turno, x.sucursal, x.cajero
+            ORDER BY x.fecha_dia, x.turno, x.sucursal, x.cajero;
+        """)).Select(r => new List<object>
+        {
+            DateOnlyText(r, "fecha_dia"), Text(r, "turno"), Text(r, "sucursal"), Text(r, "cajero"),
+            Val(r, "dinero_vendido"), Val(r, "efectivo"), Val(r, "qr"), Val(r, "tarjeta"), Val(r, "transferencia"),
+            Val(r, "productos_vendidos"), Val(r, "uso_y_cobro_mesas"), Val(r, "propinas"),
+            0, 0, 0, Val(r, "dinero_vendido"), ""
+        }));
+
+        List<List<object>> dineroTurno = new()
+        {
+            new() { "fecha", "turno", "sucursal", "cajero", "efectivo", "qr", "tarjeta", "transferencia", "total_vendido" }
+        };
+        dineroTurno.AddRange(resumenTurno.Skip(1).Select(r => new List<object> { r[0], r[1], r[2], r[3], r[5], r[6], r[7], r[8], r[4] }));
+
+        List<List<object>> ventasCadaCajero = new()
+        {
+            new() { "fecha", "sucursal", "cajero", "cantidad_operaciones", "total_vendido" }
+        };
+        ventasCadaCajero.AddRange((await db.QueryAsync(con, """
+            SELECT DATE(v.fecha) AS fecha_dia,
+                   CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+                   v.cajero,
+                   COUNT(*) AS cantidad_operaciones,
+                   SUM(v.total) AS total_vendido
+            FROM ventas v
+            INNER JOIN sucursales s ON s.id = v.sucursal_id
+            GROUP BY DATE(v.fecha), s.id, v.cajero
+            ORDER BY DATE(v.fecha), s.id, v.cajero;
+        """)).Select(r => new List<object>
+        {
+            DateOnlyText(r, "fecha_dia"), Text(r, "sucursal"), Text(r, "cajero"),
+            Val(r, "cantidad_operaciones"), Val(r, "total_vendido")
+        }));
+
+        List<List<object>> comoPagaron = new()
+        {
+            new() { "fecha", "sucursal", "metodo_pago", "cantidad", "total" }
+        };
+        comoPagaron.AddRange((await db.QueryAsync(con, """
+            SELECT DATE(v.fecha) AS fecha_dia,
+                   CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+                   v.metodo_pago,
+                   COUNT(*) AS cantidad,
+                   SUM(v.total) AS total
+            FROM ventas v
+            INNER JOIN sucursales s ON s.id = v.sucursal_id
+            GROUP BY DATE(v.fecha), s.id, v.metodo_pago
+            ORDER BY DATE(v.fecha), s.id, v.metodo_pago;
+        """)).Select(r => new List<object>
+        {
+            DateOnlyText(r, "fecha_dia"), Text(r, "sucursal"), Text(r, "metodo_pago"),
+            Val(r, "cantidad"), Val(r, "total")
+        }));
+
+        List<List<object>> gananciaNegocio = new()
+        {
+            new() { "fecha", "sucursal", "productos_vendidos", "uso_y_cobro_mesas", "total_ingreso", "ayuda_comida", "uso_interno", "perdidas", "neto_para_revisar" }
+        };
+        gananciaNegocio.AddRange(resumen.Select((r, idx) => idx == 0 ? null : new List<object> { r[0], r[1], r[2], r[3], r[4], 0, 0, 0, r[4] }).Where(r => r != null)!);
+
         await ReplaceSheetAsync(service, "Ventas", ventas);
         await ReplaceSheetAsync(service, "Detalle_Ventas", detalle);
         await ReplaceSheetAsync(service, "Cobros_Mesa", cobrosMesa);
@@ -1044,6 +1161,18 @@ public sealed class SheetsReporter
         await ReplaceSheetAsync(service, "Reservas", reservas);
         await ReplaceSheetAsync(service, "Propinas", propinas);
         await ReplaceSheetAsync(service, "Resumen_Diario", resumen);
+        await ReplaceSheetAsync(service, "Resumen_Turno", resumenTurno);
+        await ReplaceSheetAsync(service, "Dinero_Turno", dineroTurno);
+        await ReplaceSheetAsync(service, "Ventas_Cada_Cajero", ventasCadaCajero);
+        await ReplaceSheetAsync(service, "Como_Pagaron_Clientes", comoPagaron);
+        await ReplaceSheetAsync(service, "Ganancia_Negocio", gananciaNegocio);
+
+        await InitSheetIfEmptyAsync(service, "Empleados_Turnos", new List<object> { "empleado", "oficio", "sucursal", "turno", "hora_entrada", "hora_salida", "ayuda_comida", "estado", "observacion" });
+        await InitSheetIfEmptyAsync(service, "Ayuda_Comida_Empleados", new List<object> { "fecha", "turno", "empleado", "oficio", "monto_comida", "autorizado_por", "observacion" });
+        await InitSheetIfEmptyAsync(service, "Ingreso_Mercaderia", new List<object> { "fecha", "producto", "cantidad_que_entro", "unidad", "precio_compra", "total_compra", "registrado_por", "observacion" });
+        await InitSheetIfEmptyAsync(service, "Productos_Usados_Sin_Venta", new List<object> { "fecha", "hora", "turno", "producto", "cantidad", "motivo", "para_quien_fue", "costo_aproximado", "autorizado_por", "observacion" });
+        await InitSheetIfEmptyAsync(service, "Productos_Perdidos_Danados", new List<object> { "fecha", "hora", "producto", "cantidad", "que_paso", "costo_perdido", "registrado_por", "observacion" });
+        await InitSheetIfEmptyAsync(service, "Historial_Productos", new List<object> { "fecha", "hora", "producto", "tipo_movimiento", "cantidad", "responsable", "observacion" });
 
         return "Google Sheets actualizado desde MySQL Railway.";
     }

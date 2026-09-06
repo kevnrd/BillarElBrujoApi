@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V11_MESAS_EN_VIVO_ADMIN",
+            version = "V12_FIX_DEPLOY_MESAS_EN_VIVO",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -717,6 +717,52 @@ static async Task TrySyncSheets(Db db, SheetsReporter sheets)
     {
         // No se debe perder la venta si Google Sheets falla.
         // La venta ya queda guardada en MySQL y luego se puede forzar /api/sheets/sync.
+    }
+}
+
+
+static async Task EnsureMesasEnVivoTables(MySqlConnection con)
+{
+    await using (var cmd = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS mesa_estados (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            sucursal_id INT NOT NULL,
+            mesa_id INT NOT NULL,
+            mesa VARCHAR(100) NOT NULL,
+            estado VARCHAR(50) NOT NULL,
+            cajero VARCHAR(100) NULL,
+            inicio DATETIME NULL,
+            fin_programado DATETIME NULL,
+            minutos INT NOT NULL DEFAULT 0,
+            total_mesa DECIMAL(10,2) NOT NULL DEFAULT 0,
+            total_consumo DECIMAL(10,2) NOT NULL DEFAULT 0,
+            total_general DECIMAL(10,2) NOT NULL DEFAULT 0,
+            cliente_reserva VARCHAR(150) NULL,
+            actualizado DATETIME NOT NULL,
+            sync_key VARCHAR(180) NOT NULL,
+            UNIQUE KEY uk_mesa_estado (sucursal_id, mesa_id)
+        );
+    """, con))
+    {
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    await using (var cmd = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS mesa_consumos_vivos (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            sucursal_id INT NOT NULL,
+            mesa_id INT NOT NULL,
+            producto VARCHAR(180) NOT NULL,
+            presentacion VARCHAR(120) NULL,
+            cantidad DECIMAL(10,2) NOT NULL DEFAULT 0,
+            precio_unitario DECIMAL(10,2) NOT NULL DEFAULT 0,
+            subtotal DECIMAL(10,2) NOT NULL DEFAULT 0,
+            actualizado DATETIME NOT NULL,
+            INDEX idx_mesa_consumos_vivos (sucursal_id, mesa_id)
+        );
+    """, con))
+    {
+        await cmd.ExecuteNonQueryAsync();
     }
 }
 

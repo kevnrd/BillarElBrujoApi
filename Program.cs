@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V9_COBROS_REPORTES_CAJA",
+            version = "V10_ADMIN_ONLINE_DATOS",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -342,6 +342,36 @@ app.MapGet("/api/ventas", async (Db db, int? sucursalId) =>
 });
 
 
+
+app.MapGet("/api/detalle-ventas", async (Db db, int? sucursalId) =>
+{
+    await using var con = await db.OpenAsync();
+
+    string where = sucursalId.HasValue ? "WHERE v.sucursal_id = @sucursal_id" : "";
+
+    string sql = $"""
+        SELECT d.venta_id AS id_venta,
+               CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+               v.cajero,
+               d.producto,
+               d.presentacion,
+               d.cantidad,
+               d.precio_unitario AS precio,
+               d.subtotal
+        FROM detalle_ventas d
+        INNER JOIN ventas v ON v.id = d.venta_id
+        INNER JOIN sucursales s ON s.id = v.sucursal_id
+        {where}
+        ORDER BY d.venta_id DESC, d.id DESC;
+    """;
+
+    Dictionary<string, object?>? parameters = sucursalId.HasValue
+        ? new Dictionary<string, object?> { ["@sucursal_id"] = sucursalId.Value }
+        : null;
+
+    return Results.Ok(await db.QueryAsync(con, sql, parameters));
+});
+
 app.MapPost("/api/cobros-mesa", async (Db db, SheetsReporter sheets, CobroMesaRequest c) =>
 {
     await using var con = await db.OpenAsync();
@@ -407,6 +437,53 @@ app.MapPost("/api/cobros-mesa", async (Db db, SheetsReporter sheets, CobroMesaRe
     await TrySyncSheets(db, sheets);
 
     return Results.Ok(new { ok = true, syncKey });
+});
+
+
+app.MapGet("/api/cobros-mesa", async (Db db, int? sucursalId) =>
+{
+    await using var con = await db.OpenAsync();
+
+    await using (var create = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS cobros_mesa (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            sucursal_id INT NOT NULL,
+            session_id INT NULL,
+            mesa_id INT NULL,
+            mesa VARCHAR(100) NOT NULL,
+            cajero VARCHAR(100) NOT NULL,
+            mesera VARCHAR(150) NULL,
+            fecha DATETIME NOT NULL,
+            tiempo VARCHAR(50) NULL,
+            total_mesa DECIMAL(10,2) NOT NULL DEFAULT 0,
+            total_consumo DECIMAL(10,2) NOT NULL DEFAULT 0,
+            total_cobrado DECIMAL(10,2) NOT NULL DEFAULT 0,
+            metodo_pago VARCHAR(50) NOT NULL,
+            sync_key VARCHAR(180) NOT NULL UNIQUE
+        );
+    """, con))
+    {
+        await create.ExecuteNonQueryAsync();
+    }
+
+    string where = sucursalId.HasValue ? "WHERE c.sucursal_id = @sucursal_id" : "";
+
+    string sql = $"""
+        SELECT c.id, c.session_id, DATE(c.fecha) AS fecha, TIME(c.fecha) AS hora,
+               CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+               c.mesa, c.cajero, c.mesera, c.tiempo,
+               c.total_mesa, c.total_consumo, c.total_cobrado, c.metodo_pago
+        FROM cobros_mesa c
+        INNER JOIN sucursales s ON s.id = c.sucursal_id
+        {where}
+        ORDER BY c.fecha DESC, c.id DESC;
+    """;
+
+    Dictionary<string, object?>? parameters = sucursalId.HasValue
+        ? new Dictionary<string, object?> { ["@sucursal_id"] = sucursalId.Value }
+        : null;
+
+    return Results.Ok(await db.QueryAsync(con, sql, parameters));
 });
 
 app.MapPost("/api/reservas", async (Db db, SheetsReporter sheets, ReservaRequest r) =>

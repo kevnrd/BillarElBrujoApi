@@ -1,8 +1,0 @@
-BILLAR EL BRUJO API - V10 ADMIN ONLINE DATOS
-
-Cambios:
-- /health muestra V10_ADMIN_ONLINE_DATOS.
-- Agrega /api/detalle-ventas para que el programa admin cargue consumos desde Railway.
-- Agrega /api/cobros-mesa para consultar cobros desde Railway.
-
-Subir esta API a GitHub/Railway antes de publicar el programa V47.

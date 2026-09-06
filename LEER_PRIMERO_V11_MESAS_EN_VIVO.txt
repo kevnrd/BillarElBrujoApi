@@ -1,0 +1,9 @@
+BILLAR EL BRUJO API - V11 MESAS EN VIVO
+
+Cambios:
+- Agrega /api/mesas/estado para guardar y consultar mesas ocupadas/reservadas/libres.
+- Agrega /api/mesas/consumos-vivos para consultar consumo actual de mesas abiertas.
+- El admin puede ver mesas ocupadas/reservadas desde otra computadora.
+- /health debe mostrar V11_MESAS_EN_VIVO_ADMIN.
+
+Subir estos archivos a GitHub/Railway y esperar deploy.

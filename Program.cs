@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V10_ADMIN_ONLINE_DATOS",
+            version = "V11_MESAS_EN_VIVO_ADMIN",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -477,6 +477,128 @@ app.MapGet("/api/cobros-mesa", async (Db db, int? sucursalId) =>
         INNER JOIN sucursales s ON s.id = c.sucursal_id
         {where}
         ORDER BY c.fecha DESC, c.id DESC;
+    """;
+
+    Dictionary<string, object?>? parameters = sucursalId.HasValue
+        ? new Dictionary<string, object?> { ["@sucursal_id"] = sucursalId.Value }
+        : null;
+
+    return Results.Ok(await db.QueryAsync(con, sql, parameters));
+});
+
+
+app.MapPost("/api/mesas/estado", async (Db db, SheetsReporter sheets, MesaEstadoRequest m) =>
+{
+    await using var con = await db.OpenAsync();
+
+    await EnsureMesasEnVivoTables(con);
+
+    string syncKey = string.IsNullOrWhiteSpace(m.SyncKey)
+        ? $"MESA-{m.SucursalId}-{m.MesaId}"
+        : m.SyncKey;
+
+    const string sql = """
+        INSERT INTO mesa_estados
+        (sucursal_id, mesa_id, mesa, estado, cajero, inicio, fin_programado, minutos, total_mesa, total_consumo, total_general, cliente_reserva, actualizado, sync_key)
+        VALUES
+        (@sucursal_id, @mesa_id, @mesa, @estado, @cajero, @inicio, @fin_programado, @minutos, @total_mesa, @total_consumo, @total_general, @cliente_reserva, NOW(), @sync_key)
+        ON DUPLICATE KEY UPDATE
+            mesa = VALUES(mesa),
+            estado = VALUES(estado),
+            cajero = VALUES(cajero),
+            inicio = VALUES(inicio),
+            fin_programado = VALUES(fin_programado),
+            minutos = VALUES(minutos),
+            total_mesa = VALUES(total_mesa),
+            total_consumo = VALUES(total_consumo),
+            total_general = VALUES(total_general),
+            cliente_reserva = VALUES(cliente_reserva),
+            actualizado = NOW();
+    """;
+
+    await using var cmd = new MySqlCommand(sql, con);
+    cmd.Parameters.AddWithValue("@sucursal_id", m.SucursalId);
+    cmd.Parameters.AddWithValue("@mesa_id", m.MesaId);
+    cmd.Parameters.AddWithValue("@mesa", m.Mesa ?? ("Mesa " + m.MesaId));
+    cmd.Parameters.AddWithValue("@estado", m.Estado ?? "LIBRE");
+    cmd.Parameters.AddWithValue("@cajero", m.Cajero ?? "");
+    cmd.Parameters.AddWithValue("@inicio", m.Inicio.HasValue ? m.Inicio.Value : DBNull.Value);
+    cmd.Parameters.AddWithValue("@fin_programado", m.FinProgramado.HasValue ? m.FinProgramado.Value : DBNull.Value);
+    cmd.Parameters.AddWithValue("@minutos", m.Minutos);
+    cmd.Parameters.AddWithValue("@total_mesa", m.TotalMesa);
+    cmd.Parameters.AddWithValue("@total_consumo", m.TotalConsumo);
+    cmd.Parameters.AddWithValue("@total_general", m.TotalGeneral);
+    cmd.Parameters.AddWithValue("@cliente_reserva", m.ClienteReserva ?? "");
+    cmd.Parameters.AddWithValue("@sync_key", syncKey);
+    await cmd.ExecuteNonQueryAsync();
+
+    await using (var del = new MySqlCommand("DELETE FROM mesa_consumos_vivos WHERE sucursal_id = @sucursal_id AND mesa_id = @mesa_id;", con))
+    {
+        del.Parameters.AddWithValue("@sucursal_id", m.SucursalId);
+        del.Parameters.AddWithValue("@mesa_id", m.MesaId);
+        await del.ExecuteNonQueryAsync();
+    }
+
+    foreach (var d in m.Detalle ?? new List<MesaConsumoVivoRequest>())
+    {
+        await using var det = new MySqlCommand("""
+            INSERT INTO mesa_consumos_vivos
+            (sucursal_id, mesa_id, producto, presentacion, cantidad, precio_unitario, subtotal, actualizado)
+            VALUES
+            (@sucursal_id, @mesa_id, @producto, @presentacion, @cantidad, @precio_unitario, @subtotal, NOW());
+        """, con);
+        det.Parameters.AddWithValue("@sucursal_id", m.SucursalId);
+        det.Parameters.AddWithValue("@mesa_id", m.MesaId);
+        det.Parameters.AddWithValue("@producto", d.Producto ?? "");
+        det.Parameters.AddWithValue("@presentacion", d.Presentacion ?? "");
+        det.Parameters.AddWithValue("@cantidad", d.Cantidad);
+        det.Parameters.AddWithValue("@precio_unitario", d.PrecioUnitario);
+        det.Parameters.AddWithValue("@subtotal", d.Subtotal);
+        await det.ExecuteNonQueryAsync();
+    }
+
+    return Results.Ok(new { ok = true, syncKey });
+});
+
+app.MapGet("/api/mesas/estado", async (Db db, int? sucursalId) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureMesasEnVivoTables(con);
+
+    string where = sucursalId.HasValue ? "WHERE e.sucursal_id = @sucursal_id" : "";
+
+    string sql = $"""
+        SELECT e.sucursal_id,
+               CASE WHEN e.sucursal_id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+               e.mesa_id, e.mesa, e.estado, e.cajero, e.inicio, e.fin_programado,
+               e.minutos, e.total_mesa, e.total_consumo, e.total_general,
+               e.cliente_reserva, e.actualizado
+        FROM mesa_estados e
+        {where}
+        ORDER BY e.sucursal_id, e.mesa_id;
+    """;
+
+    Dictionary<string, object?>? parameters = sucursalId.HasValue
+        ? new Dictionary<string, object?> { ["@sucursal_id"] = sucursalId.Value }
+        : null;
+
+    return Results.Ok(await db.QueryAsync(con, sql, parameters));
+});
+
+app.MapGet("/api/mesas/consumos-vivos", async (Db db, int? sucursalId) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureMesasEnVivoTables(con);
+
+    string where = sucursalId.HasValue ? "WHERE c.sucursal_id = @sucursal_id" : "";
+
+    string sql = $"""
+        SELECT c.sucursal_id,
+               CASE WHEN c.sucursal_id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+               c.mesa_id, c.producto, c.presentacion, c.cantidad, c.precio_unitario, c.subtotal
+        FROM mesa_consumos_vivos c
+        {where}
+        ORDER BY c.sucursal_id, c.mesa_id, c.id;
     """;
 
     Dictionary<string, object?>? parameters = sucursalId.HasValue
@@ -968,6 +1090,32 @@ public sealed class SheetsReporter
         return Convert.ToString(value) ?? "";
     }
 }
+
+
+public record MesaConsumoVivoRequest(
+    string? Producto,
+    string? Presentacion,
+    decimal Cantidad,
+    decimal PrecioUnitario,
+    decimal Subtotal
+);
+
+public record MesaEstadoRequest(
+    int SucursalId,
+    int MesaId,
+    string? Mesa,
+    string? Estado,
+    string? Cajero,
+    DateTime? Inicio,
+    DateTime? FinProgramado,
+    int Minutos,
+    decimal TotalMesa,
+    decimal TotalConsumo,
+    decimal TotalGeneral,
+    string? ClienteReserva,
+    string? SyncKey,
+    List<MesaConsumoVivoRequest>? Detalle
+);
 
 public record LoginRequest(string Usuario, string Clave);
 

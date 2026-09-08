@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V25_FIX_TOP_LEVEL_TURNOS",
+            version = "V26_COMISION_PRODUCTOS",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -423,6 +423,90 @@ app.MapPost("/api/admin/usuarios/{id:int}/estado", async (Db db, string clave, i
     int rows = await cmd.ExecuteNonQueryAsync();
 
     return Results.Ok(new { ok = rows > 0, id, estado });
+});
+
+
+
+app.MapPost("/api/admin/productos/comision", async (Db db, string clave, ProductCommissionRequest req) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    string nombre = (req.Nombre ?? "").Trim();
+    string tipo = (req.TipoComision ?? "NINGUNA").Trim().ToUpperInvariant();
+    bool genera = req.GeneraComision && req.ValorComision > 0;
+
+    if (string.IsNullOrWhiteSpace(nombre))
+        return Results.BadRequest(new { ok = false, message = "Nombre del producto requerido." });
+
+    if (!genera)
+    {
+        tipo = "NINGUNA";
+    }
+    else if (tipo != "PORCENTAJE" && tipo != "MONTO")
+    {
+        return Results.BadRequest(new { ok = false, message = "Tipo de comisión inválido. Use PORCENTAJE o MONTO." });
+    }
+
+    decimal valor = genera ? req.ValorComision : 0;
+
+    const string sql = """
+        UPDATE productos
+        SET genera_comision = @genera_comision,
+            tipo_comision = @tipo_comision,
+            valor_comision = @valor_comision
+        WHERE sucursal_id = @sucursal_id
+          AND LOWER(nombre) = LOWER(@nombre);
+    """;
+
+    await using var cmd = new MySqlCommand(sql, con);
+    cmd.Parameters.AddWithValue("@genera_comision", genera ? 1 : 0);
+    cmd.Parameters.AddWithValue("@tipo_comision", tipo);
+    cmd.Parameters.AddWithValue("@valor_comision", valor);
+    cmd.Parameters.AddWithValue("@sucursal_id", req.SucursalId <= 0 ? 1 : req.SucursalId);
+    cmd.Parameters.AddWithValue("@nombre", nombre);
+
+    int rows = await cmd.ExecuteNonQueryAsync();
+    if (rows <= 0)
+        return Results.NotFound(new { ok = false, message = "Producto no encontrado en esa sucursal." });
+
+    return Results.Ok(new
+    {
+        ok = true,
+        producto = nombre,
+        sucursal_id = req.SucursalId <= 0 ? 1 : req.SucursalId,
+        genera_comision = genera,
+        tipo_comision = tipo,
+        valor_comision = valor
+    });
+});
+
+app.MapGet("/api/admin/productos/comision", async (Db db, string clave, int sucursalId) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    const string sql = """
+        SELECT id, sucursal_id, nombre, categoria,
+               COALESCE(genera_comision, 0) AS genera_comision,
+               COALESCE(tipo_comision, 'NINGUNA') AS tipo_comision,
+               COALESCE(valor_comision, 0) AS valor_comision
+        FROM productos
+        WHERE sucursal_id = @sucursal_id
+          AND estado = 'ACTIVO'
+        ORDER BY categoria, nombre;
+    """;
+
+    return Results.Ok(await db.QueryAsync(con, sql, new Dictionary<string, object?>
+    {
+        ["@sucursal_id"] = sucursalId <= 0 ? 1 : sucursalId
+    }));
 });
 
 
@@ -2532,6 +2616,14 @@ public record MesaEstadoRequest(
     string? ClienteReserva,
     string? SyncKey,
     List<MesaConsumoVivoRequest>? Detalle
+);
+
+public record ProductCommissionRequest(
+    int SucursalId,
+    string Nombre,
+    bool GeneraComision,
+    string TipoComision,
+    decimal ValorComision
 );
 
 public record LoginRequest(string Usuario, string Clave);

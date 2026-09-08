@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V20_FIX_APP_PRODUCTOS_MESAS",
+            version = "V21_USUARIOS_ADMIN",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -240,9 +240,13 @@ app.MapGet("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, st
 app.MapPost("/api/login", async (Db db, LoginRequest req) =>
 {
     await using var con = await db.OpenAsync();
+    await EnsureUserManagementTables(con);
 
     const string sql = """
-        SELECT u.id, u.usuario, u.rol, u.estado, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal
+        SELECT u.id, u.usuario, u.rol, u.estado, u.sucursal_id,
+               COALESCE(u.nombre_completo, u.usuario) AS nombre_completo,
+               COALESCE(u.caja_nombre, '') AS caja_nombre,
+               CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal
         FROM usuarios u
         LEFT JOIN sucursales s ON s.id = u.sucursal_id
         WHERE u.usuario = @usuario AND u.clave = @clave AND u.estado = 'ACTIVO'
@@ -262,17 +266,132 @@ app.MapPost("/api/login", async (Db db, LoginRequest req) =>
         id = rd.GetInt32("id"),
         usuario = rd.GetString("usuario"),
         rol = rd.GetString("rol"),
-        sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "TODAS" : rd.GetString("sucursal")
+        sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "TODAS" : rd.GetString("sucursal"),
+        nombre = rd.IsDBNull(rd.GetOrdinal("nombre_completo")) ? rd.GetString("usuario") : rd.GetString("nombre_completo"),
+        caja = rd.IsDBNull(rd.GetOrdinal("caja_nombre")) ? "" : rd.GetString("caja_nombre"),
+        sucursal_id = rd.IsDBNull(rd.GetOrdinal("sucursal_id")) ? 1 : rd.GetInt32("sucursal_id")
     });
 });
+
+
+app.MapGet("/api/admin/usuarios", async (Db db, string clave) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureUserManagementTables(con);
+
+    const string sql = """
+        SELECT u.id,
+               u.usuario,
+               COALESCE(u.nombre_completo, u.usuario) AS nombre_completo,
+               u.rol,
+               u.sucursal_id,
+               CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+               COALESCE(u.caja_nombre, '') AS caja_nombre,
+               u.estado
+        FROM usuarios u
+        LEFT JOIN sucursales s ON s.id = u.sucursal_id
+        ORDER BY u.rol, u.sucursal_id, u.usuario;
+    """;
+
+    return Results.Ok(await db.QueryAsync(con, sql, new Dictionary<string, object?>()));
+});
+
+app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest req) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureUserManagementTables(con);
+
+    string usuario = (req.Usuario ?? "").Trim().ToLowerInvariant();
+    string pass = (req.Clave ?? "").Trim();
+    string rol = NormalizarRol(req.Rol);
+    int sucursalId = req.SucursalId <= 0 ? 1 : req.SucursalId;
+    string estado = string.IsNullOrWhiteSpace(req.Estado) ? "ACTIVO" : req.Estado.Trim().ToUpperInvariant();
+
+    if (string.IsNullOrWhiteSpace(usuario))
+        return Results.BadRequest(new { ok = false, message = "Usuario requerido." });
+
+    if (string.IsNullOrWhiteSpace(pass))
+    {
+        object? actual = null;
+        await using (var getPass = new MySqlCommand("SELECT clave FROM usuarios WHERE usuario = @usuario LIMIT 1;", con))
+        {
+            getPass.Parameters.AddWithValue("@usuario", usuario);
+            actual = await getPass.ExecuteScalarAsync();
+        }
+        pass = actual == null ? "123456" : Convert.ToString(actual) ?? "123456";
+    }
+
+    await using var cmd = new MySqlCommand("""
+        INSERT INTO usuarios
+            (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
+        VALUES
+            (@usuario, @clave, @rol, @sucursal_id, @estado, @nombre_completo, @caja_nombre)
+        ON DUPLICATE KEY UPDATE
+            clave = VALUES(clave),
+            rol = VALUES(rol),
+            sucursal_id = VALUES(sucursal_id),
+            estado = VALUES(estado),
+            nombre_completo = VALUES(nombre_completo),
+            caja_nombre = VALUES(caja_nombre);
+    """, con);
+
+    cmd.Parameters.AddWithValue("@usuario", usuario);
+    cmd.Parameters.AddWithValue("@clave", pass);
+    cmd.Parameters.AddWithValue("@rol", rol);
+    cmd.Parameters.AddWithValue("@sucursal_id", sucursalId);
+    cmd.Parameters.AddWithValue("@estado", estado);
+    cmd.Parameters.AddWithValue("@nombre_completo", string.IsNullOrWhiteSpace(req.NombreCompleto) ? usuario : req.NombreCompleto.Trim());
+    cmd.Parameters.AddWithValue("@caja_nombre", req.CajaNombre ?? "");
+    await cmd.ExecuteNonQueryAsync();
+
+    return Results.Ok(new
+    {
+        ok = true,
+        usuario,
+        rol,
+        sucursal_id = sucursalId,
+        estado,
+        message = "Usuario guardado."
+    });
+});
+
+app.MapPost("/api/admin/usuarios/{id:int}/estado", async (Db db, string clave, int id, UserEstadoRequest req) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureUserManagementTables(con);
+
+    string estado = string.IsNullOrWhiteSpace(req.Estado) ? "INACTIVO" : req.Estado.Trim().ToUpperInvariant();
+    if (estado != "ACTIVO" && estado != "INACTIVO")
+        return Results.BadRequest(new { ok = false, message = "Estado inválido." });
+
+    await using var cmd = new MySqlCommand("UPDATE usuarios SET estado = @estado WHERE id = @id;", con);
+    cmd.Parameters.AddWithValue("@estado", estado);
+    cmd.Parameters.AddWithValue("@id", id);
+    int rows = await cmd.ExecuteNonQueryAsync();
+
+    return Results.Ok(new { ok = rows > 0, id, estado });
+});
+
 
 app.MapPost("/api/app-mesera/login", async (Db db, LoginRequest req) =>
 {
     await using var con = await db.OpenAsync();
+    await EnsureUserManagementTables(con);
     await EnsureAppMeseraTables(con);
 
     const string sql = """
         SELECT u.id, u.usuario, u.rol, u.estado, u.sucursal_id,
+               COALESCE(u.nombre_completo, u.usuario) AS nombre_completo,
+               COALESCE(u.caja_nombre, '') AS caja_nombre,
                CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal
         FROM usuarios u
         LEFT JOIN sucursales s ON s.id = u.sucursal_id
@@ -302,7 +421,7 @@ app.MapPost("/api/app-mesera/login", async (Db db, LoginRequest req) =>
         ok = true,
         id = rd.GetInt32("id"),
         usuario = rd.GetString("usuario"),
-        nombre = rd.GetString("usuario"),
+        nombre = rd.IsDBNull(rd.GetOrdinal("nombre_completo")) ? rd.GetString("usuario") : rd.GetString("nombre_completo"),
         rol,
         sucursal_id = sucursalId,
         sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "PRIMERA SUCURSAL" : rd.GetString("sucursal")
@@ -1497,6 +1616,58 @@ static bool EsProductoConComision(string nombre)
     return n.Contains("RON") || n.Contains("TEQUILA") || n.Contains("GIN") || n.Contains("FERNET") || n.Contains("WHISK") || n.Contains("WISKIE") || n.Contains("ABUELO") || n.Contains("HABANA") || n.Contains("BLACK LABEL");
 }
 
+
+static async Task EnsureUserManagementTables(MySqlConnection con)
+{
+    await using (var cmd = new MySqlCommand("ALTER TABLE usuarios ADD COLUMN nombre_completo VARCHAR(180) NULL;", con))
+    {
+        try { await cmd.ExecuteNonQueryAsync(); } catch { }
+    }
+
+    await using (var cmd = new MySqlCommand("ALTER TABLE usuarios ADD COLUMN caja_nombre VARCHAR(60) NULL;", con))
+    {
+        try { await cmd.ExecuteNonQueryAsync(); } catch { }
+    }
+
+    await using (var seed = new MySqlCommand("""
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
+        SELECT 'admin', 'ElBrujo2026SI', 'ADMINISTRADOR', 1, 'ACTIVO', 'Administrador', 'ADMIN'
+        WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'admin');
+
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
+        SELECT 'caja1', 'BrujoPremiu2026', 'CAJERO', 1, 'ACTIVO', 'Caja Sucursal 1', 'CAJA 1'
+        WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'caja1');
+
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
+        SELECT 'caja2', 'BrujoPRO2026', 'CAJERO', 2, 'ACTIVO', 'Caja Sucursal 2', 'CAJA 1'
+        WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'caja2');
+
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
+        SELECT 'caja2_2', 'Caja2Sucursal2', 'CAJERO', 2, 'ACTIVO', 'Caja 2 Sucursal 2', 'CAJA 2'
+        WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'caja2_2');
+
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
+        SELECT 'ana_mesera', 'mesera123', 'MESERA', 1, 'ACTIVO', 'Ana Mesera', ''
+        WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'ana_mesera');
+
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
+        SELECT 'rosa_mesera', 'mesera123', 'MESERA', 2, 'ACTIVO', 'Rosa Mesera', ''
+        WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'rosa_mesera');
+    """, con))
+    {
+        try { await seed.ExecuteNonQueryAsync(); } catch { }
+    }
+}
+
+static string NormalizarRol(string? rol)
+{
+    string r = (rol ?? "").Trim().ToUpperInvariant();
+    if (r.Contains("ADMIN")) return "ADMINISTRADOR";
+    if (r.Contains("CAJ")) return "CAJERO";
+    if (r.Contains("MESER")) return "MESERA";
+    return string.IsNullOrWhiteSpace(r) ? "CAJERO" : r;
+}
+
 static async Task EnsureAppMeseraTables(MySqlConnection con)
 {
     await using (var alter1 = new MySqlCommand("ALTER TABLE productos ADD COLUMN genera_comision TINYINT(1) NOT NULL DEFAULT 0;", con))
@@ -2285,3 +2456,16 @@ public sealed record PedidoEstadoRequest(
     string Estado,
     string? CajeroUsuario
 );
+
+
+public record AdminUserRequest(
+    string Usuario,
+    string Clave,
+    string NombreCompleto,
+    string Rol,
+    int SucursalId,
+    string CajaNombre,
+    string Estado
+);
+
+public record UserEstadoRequest(string Estado);

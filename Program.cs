@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V24_FIX_RAILWAY_BUILD_TURNOS",
+            version = "V25_FIX_TOP_LEVEL_TURNOS",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -1719,57 +1719,6 @@ static async Task HashPlainUserPasswords(MySqlConnection con)
     }
 }
 
-static class PasswordHasher
-{
-    const int Iterations = 100000;
-    const int SaltSize = 16;
-    const int KeySize = 32;
-    const string Prefix = "PBKDF2$";
-
-    public static bool IsHashed(string? value)
-    {
-        return !string.IsNullOrWhiteSpace(value) && value.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase);
-    }
-
-    public static string Hash(string password)
-    {
-        password ??= "";
-        byte[] salt = RandomNumberGenerator.GetBytes(SaltSize);
-        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, Iterations, HashAlgorithmName.SHA256);
-        byte[] key = pbkdf2.GetBytes(KeySize);
-        return Prefix + Iterations + "$" + Convert.ToBase64String(salt) + "$" + Convert.ToBase64String(key);
-    }
-
-    public static bool Verify(string password, string stored)
-    {
-        password ??= "";
-        stored ??= "";
-
-        if (!IsHashed(stored))
-            return stored == password;
-
-        string[] parts = stored.Split('$');
-        if (parts.Length != 4) return false;
-        if (!int.TryParse(parts[1], out int iterations)) return false;
-
-        byte[] salt;
-        byte[] expected;
-        try
-        {
-            salt = Convert.FromBase64String(parts[2]);
-            expected = Convert.FromBase64String(parts[3]);
-        }
-        catch
-        {
-            return false;
-        }
-
-        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, HashAlgorithmName.SHA256);
-        byte[] actual = pbkdf2.GetBytes(expected.Length);
-        return CryptographicOperations.FixedTimeEquals(actual, expected);
-    }
-}
-
 static async Task EnsureUserManagementTables(MySqlConnection con)
 {
     await using (var alterClave = new MySqlCommand("ALTER TABLE usuarios MODIFY COLUMN clave VARCHAR(255) NOT NULL;", con))
@@ -1984,6 +1933,58 @@ static async Task EnsureMesasEnVivoTables(MySqlConnection con)
         await cmd.ExecuteNonQueryAsync();
     }
 }
+
+static class PasswordHasher
+{
+    const int Iterations = 100000;
+    const int SaltSize = 16;
+    const int KeySize = 32;
+    const string Prefix = "PBKDF2$";
+
+    public static bool IsHashed(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value) && value.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string Hash(string password)
+    {
+        password ??= "";
+        byte[] salt = RandomNumberGenerator.GetBytes(SaltSize);
+        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, Iterations, HashAlgorithmName.SHA256);
+        byte[] key = pbkdf2.GetBytes(KeySize);
+        return Prefix + Iterations + "$" + Convert.ToBase64String(salt) + "$" + Convert.ToBase64String(key);
+    }
+
+    public static bool Verify(string password, string stored)
+    {
+        password ??= "";
+        stored ??= "";
+
+        if (!IsHashed(stored))
+            return stored == password;
+
+        string[] parts = stored.Split('$');
+        if (parts.Length != 4) return false;
+        if (!int.TryParse(parts[1], out int iterations)) return false;
+
+        byte[] salt;
+        byte[] expected;
+        try
+        {
+            salt = Convert.FromBase64String(parts[2]);
+            expected = Convert.FromBase64String(parts[3]);
+        }
+        catch
+        {
+            return false;
+        }
+
+        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, HashAlgorithmName.SHA256);
+        byte[] actual = pbkdf2.GetBytes(expected.Length);
+        return CryptographicOperations.FixedTimeEquals(actual, expected);
+    }
+}
+
 
 public sealed class Db
 {

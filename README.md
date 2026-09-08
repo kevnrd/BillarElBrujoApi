@@ -1,3 +1,7 @@
+# BillarElBrujoApi V24 - Fix Railway Build Turnos
+
+Versión para recuperar deploy en Railway con usuarios, contraseñas cifradas y turnos.
+
 # BillarElBrujoApi V7
 
 API ASP.NET Core para Railway + MySQL + Google Sheets.

@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V22_PASSWORD_HASH_USUARIOS",
+            version = "V24_FIX_RAILWAY_BUILD_TURNOS",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -253,12 +253,14 @@ app.MapPost("/api/login", async (Db db, LoginRequest req) =>
     string sucursal = "PRIMERA SUCURSAL";
     string nombre = "";
     string caja = "";
+    string turno = "MAÑANA";
     string claveGuardada = "";
 
     const string sql = """
         SELECT u.id, u.usuario, u.clave, u.rol, u.estado, u.sucursal_id,
                COALESCE(u.nombre_completo, u.usuario) AS nombre_completo,
                COALESCE(u.caja_nombre, '') AS caja_nombre,
+               COALESCE(u.turno, 'MAÑANA') AS turno,
                CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal
         FROM usuarios u
         LEFT JOIN sucursales s ON s.id = u.sucursal_id
@@ -281,6 +283,7 @@ app.MapPost("/api/login", async (Db db, LoginRequest req) =>
         sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "TODAS" : rd.GetString("sucursal");
         nombre = rd.IsDBNull(rd.GetOrdinal("nombre_completo")) ? usuarioDb : rd.GetString("nombre_completo");
         caja = rd.IsDBNull(rd.GetOrdinal("caja_nombre")) ? "" : rd.GetString("caja_nombre");
+        turno = rd.IsDBNull(rd.GetOrdinal("turno")) ? "MAÑANA" : rd.GetString("turno");
     }
 
     if (!PasswordHasher.Verify(claveIngresada, claveGuardada))
@@ -297,6 +300,7 @@ app.MapPost("/api/login", async (Db db, LoginRequest req) =>
         sucursal,
         nombre,
         caja,
+        turno,
         sucursal_id = sucursalId
     });
 });
@@ -317,6 +321,7 @@ app.MapGet("/api/admin/usuarios", async (Db db, string clave) =>
                u.sucursal_id,
                CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
                COALESCE(u.caja_nombre, '') AS caja_nombre,
+               COALESCE(u.turno, 'MAÑANA') AS turno,
                u.estado
         FROM usuarios u
         LEFT JOIN sucursales s ON s.id = u.sucursal_id
@@ -339,6 +344,7 @@ app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest 
     string rol = NormalizarRol(req.Rol);
     int sucursalId = req.SucursalId <= 0 ? 1 : req.SucursalId;
     string estado = string.IsNullOrWhiteSpace(req.Estado) ? "ACTIVO" : req.Estado.Trim().ToUpperInvariant();
+    string turno = NormalizarTurno(req.Turno);
 
     if (string.IsNullOrWhiteSpace(usuario))
         return Results.BadRequest(new { ok = false, message = "Usuario requerido." });
@@ -364,16 +370,17 @@ app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest 
 
     await using var cmd = new MySqlCommand("""
         INSERT INTO usuarios
-            (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
+            (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre, turno)
         VALUES
-            (@usuario, @clave, @rol, @sucursal_id, @estado, @nombre_completo, @caja_nombre)
+            (@usuario, @clave, @rol, @sucursal_id, @estado, @nombre_completo, @caja_nombre, @turno)
         ON DUPLICATE KEY UPDATE
             clave = VALUES(clave),
             rol = VALUES(rol),
             sucursal_id = VALUES(sucursal_id),
             estado = VALUES(estado),
             nombre_completo = VALUES(nombre_completo),
-            caja_nombre = VALUES(caja_nombre);
+            caja_nombre = VALUES(caja_nombre),
+            turno = VALUES(turno);
     """, con);
 
     cmd.Parameters.AddWithValue("@usuario", usuario);
@@ -383,6 +390,7 @@ app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest 
     cmd.Parameters.AddWithValue("@estado", estado);
     cmd.Parameters.AddWithValue("@nombre_completo", string.IsNullOrWhiteSpace(req.NombreCompleto) ? usuario : req.NombreCompleto.Trim());
     cmd.Parameters.AddWithValue("@caja_nombre", req.CajaNombre ?? "");
+    cmd.Parameters.AddWithValue("@turno", turno);
     await cmd.ExecuteNonQueryAsync();
 
     return Results.Ok(new
@@ -391,6 +399,7 @@ app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest 
         usuario,
         rol,
         sucursal_id = sucursalId,
+        turno,
         estado,
         message = "Usuario guardado."
     });
@@ -432,12 +441,14 @@ app.MapPost("/api/app-mesera/login", async (Db db, LoginRequest req) =>
     string rol = "";
     string sucursal = "PRIMERA SUCURSAL";
     string nombre = "";
+    string turno = "MAÑANA";
     string claveGuardada = "";
 
     const string sql = """
         SELECT u.id, u.usuario, u.clave, u.rol, u.estado, u.sucursal_id,
                COALESCE(u.nombre_completo, u.usuario) AS nombre_completo,
                COALESCE(u.caja_nombre, '') AS caja_nombre,
+               COALESCE(u.turno, 'MAÑANA') AS turno,
                CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal
         FROM usuarios u
         LEFT JOIN sucursales s ON s.id = u.sucursal_id
@@ -459,6 +470,7 @@ app.MapPost("/api/app-mesera/login", async (Db db, LoginRequest req) =>
         sucursalId = rd.IsDBNull(rd.GetOrdinal("sucursal_id")) ? 1 : rd.GetInt32("sucursal_id");
         sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "PRIMERA SUCURSAL" : rd.GetString("sucursal");
         nombre = rd.IsDBNull(rd.GetOrdinal("nombre_completo")) ? usuarioDb : rd.GetString("nombre_completo");
+        turno = rd.IsDBNull(rd.GetOrdinal("turno")) ? "MAÑANA" : rd.GetString("turno");
     }
 
     if (!PasswordHasher.Verify(claveIngresada, claveGuardada))
@@ -480,6 +492,7 @@ app.MapPost("/api/app-mesera/login", async (Db db, LoginRequest req) =>
         usuario = usuarioDb,
         nombre,
         rol,
+        turno,
         sucursal_id = sucursalId,
         sucursal
     });
@@ -1774,29 +1787,34 @@ static async Task EnsureUserManagementTables(MySqlConnection con)
         try { await cmd.ExecuteNonQueryAsync(); } catch { }
     }
 
+    await using (var cmd = new MySqlCommand("ALTER TABLE usuarios ADD COLUMN turno VARCHAR(20) NOT NULL DEFAULT 'MAÑANA';", con))
+    {
+        try { await cmd.ExecuteNonQueryAsync(); } catch { }
+    }
+
     await using (var seed = new MySqlCommand("""
-        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
-        SELECT 'admin', 'ElBrujo2026SI', 'ADMINISTRADOR', 1, 'ACTIVO', 'Administrador', 'ADMIN'
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre, turno)
+        SELECT 'admin', 'ElBrujo2026SI', 'ADMINISTRADOR', 1, 'ACTIVO', 'Administrador', 'ADMIN', 'MAÑANA'
         WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'admin');
 
-        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
-        SELECT 'caja1', 'BrujoPremiu2026', 'CAJERO', 1, 'ACTIVO', 'Caja Sucursal 1', 'CAJA 1'
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre, turno)
+        SELECT 'caja1', 'BrujoPremiu2026', 'CAJERO', 1, 'ACTIVO', 'Caja Sucursal 1', 'CAJA 1', 'MAÑANA'
         WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'caja1');
 
-        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
-        SELECT 'caja2', 'BrujoPRO2026', 'CAJERO', 2, 'ACTIVO', 'Caja Sucursal 2', 'CAJA 1'
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre, turno)
+        SELECT 'caja2', 'BrujoPRO2026', 'CAJERO', 2, 'ACTIVO', 'Caja Sucursal 2', 'CAJA 1', 'MAÑANA'
         WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'caja2');
 
-        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
-        SELECT 'caja2_2', 'Caja2Sucursal2', 'CAJERO', 2, 'ACTIVO', 'Caja 2 Sucursal 2', 'CAJA 2'
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre, turno)
+        SELECT 'caja2_2', 'Caja2Sucursal2', 'CAJERO', 2, 'ACTIVO', 'Caja 2 Sucursal 2', 'CAJA 2', 'NOCHE'
         WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'caja2_2');
 
-        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
-        SELECT 'ana_mesera', 'mesera123', 'MESERA', 1, 'ACTIVO', 'Ana Mesera', ''
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre, turno)
+        SELECT 'ana_mesera', 'mesera123', 'MESERA', 1, 'ACTIVO', 'Ana Mesera', '', 'MAÑANA'
         WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'ana_mesera');
 
-        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre)
-        SELECT 'rosa_mesera', 'mesera123', 'MESERA', 2, 'ACTIVO', 'Rosa Mesera', ''
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado, nombre_completo, caja_nombre, turno)
+        SELECT 'rosa_mesera', 'mesera123', 'MESERA', 2, 'ACTIVO', 'Rosa Mesera', '', 'NOCHE'
         WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'rosa_mesera');
     """, con))
     {
@@ -1813,6 +1831,13 @@ static string NormalizarRol(string? rol)
     if (r.Contains("CAJ")) return "CAJERO";
     if (r.Contains("MESER")) return "MESERA";
     return string.IsNullOrWhiteSpace(r) ? "CAJERO" : r;
+}
+
+static string NormalizarTurno(string? turno)
+{
+    string t = (turno ?? "").Trim().ToUpperInvariant();
+    if (t.Contains("NOCHE")) return "NOCHE";
+    return "MAÑANA";
 }
 
 static async Task EnsureAppMeseraTables(MySqlConnection con)
@@ -2612,6 +2637,7 @@ public record AdminUserRequest(
     string Rol,
     int SucursalId,
     string CajaNombre,
+    string Turno,
     string Estado
 );
 

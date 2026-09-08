@@ -1,4 +1,5 @@
 using System.Text;
+using System.Security.Cryptography;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Services;
 using Google.Apis.Sheets.v4;
@@ -41,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V21_USUARIOS_ADMIN",
+            version = "V22_PASSWORD_HASH_USUARIOS",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -242,37 +243,63 @@ app.MapPost("/api/login", async (Db db, LoginRequest req) =>
     await using var con = await db.OpenAsync();
     await EnsureUserManagementTables(con);
 
+    string usuario = (req.Usuario ?? "").Trim().ToLowerInvariant();
+    string claveIngresada = req.Clave ?? "";
+
+    int id = 0;
+    string usuarioDb = "";
+    string rol = "";
+    int sucursalId = 1;
+    string sucursal = "PRIMERA SUCURSAL";
+    string nombre = "";
+    string caja = "";
+    string claveGuardada = "";
+
     const string sql = """
-        SELECT u.id, u.usuario, u.rol, u.estado, u.sucursal_id,
+        SELECT u.id, u.usuario, u.clave, u.rol, u.estado, u.sucursal_id,
                COALESCE(u.nombre_completo, u.usuario) AS nombre_completo,
                COALESCE(u.caja_nombre, '') AS caja_nombre,
                CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal
         FROM usuarios u
         LEFT JOIN sucursales s ON s.id = u.sucursal_id
-        WHERE u.usuario = @usuario AND u.clave = @clave AND u.estado = 'ACTIVO'
+        WHERE u.usuario = @usuario AND u.estado = 'ACTIVO'
         LIMIT 1;
     """;
 
-    await using var cmd = new MySqlCommand(sql, con);
-    cmd.Parameters.AddWithValue("@usuario", req.Usuario);
-    cmd.Parameters.AddWithValue("@clave", req.Clave);
+    await using (var cmd = new MySqlCommand(sql, con))
+    {
+        cmd.Parameters.AddWithValue("@usuario", usuario);
+        await using var rd = await cmd.ExecuteReaderAsync();
+        if (!await rd.ReadAsync())
+            return Results.Unauthorized();
 
-    await using var rd = await cmd.ExecuteReaderAsync();
-    if (!await rd.ReadAsync())
+        id = rd.GetInt32("id");
+        usuarioDb = rd.GetString("usuario");
+        claveGuardada = rd.GetString("clave");
+        rol = rd.GetString("rol");
+        sucursalId = rd.IsDBNull(rd.GetOrdinal("sucursal_id")) ? 1 : rd.GetInt32("sucursal_id");
+        sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "TODAS" : rd.GetString("sucursal");
+        nombre = rd.IsDBNull(rd.GetOrdinal("nombre_completo")) ? usuarioDb : rd.GetString("nombre_completo");
+        caja = rd.IsDBNull(rd.GetOrdinal("caja_nombre")) ? "" : rd.GetString("caja_nombre");
+    }
+
+    if (!PasswordHasher.Verify(claveIngresada, claveGuardada))
         return Results.Unauthorized();
+
+    if (!PasswordHasher.IsHashed(claveGuardada))
+        await UpdateUserPasswordHash(con, id, claveIngresada);
 
     return Results.Ok(new
     {
-        id = rd.GetInt32("id"),
-        usuario = rd.GetString("usuario"),
-        rol = rd.GetString("rol"),
-        sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "TODAS" : rd.GetString("sucursal"),
-        nombre = rd.IsDBNull(rd.GetOrdinal("nombre_completo")) ? rd.GetString("usuario") : rd.GetString("nombre_completo"),
-        caja = rd.IsDBNull(rd.GetOrdinal("caja_nombre")) ? "" : rd.GetString("caja_nombre"),
-        sucursal_id = rd.IsDBNull(rd.GetOrdinal("sucursal_id")) ? 1 : rd.GetInt32("sucursal_id")
+        id,
+        usuario = usuarioDb,
+        rol,
+        sucursal,
+        nombre,
+        caja,
+        sucursal_id = sucursalId
     });
 });
-
 
 app.MapGet("/api/admin/usuarios", async (Db db, string clave) =>
 {
@@ -316,6 +343,7 @@ app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest 
     if (string.IsNullOrWhiteSpace(usuario))
         return Results.BadRequest(new { ok = false, message = "Usuario requerido." });
 
+    string passHash;
     if (string.IsNullOrWhiteSpace(pass))
     {
         object? actual = null;
@@ -324,7 +352,14 @@ app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest 
             getPass.Parameters.AddWithValue("@usuario", usuario);
             actual = await getPass.ExecuteScalarAsync();
         }
-        pass = actual == null ? "123456" : Convert.ToString(actual) ?? "123456";
+
+        passHash = actual == null ? PasswordHasher.Hash("123456") : Convert.ToString(actual) ?? PasswordHasher.Hash("123456");
+        if (!PasswordHasher.IsHashed(passHash))
+            passHash = PasswordHasher.Hash(passHash);
+    }
+    else
+    {
+        passHash = PasswordHasher.Hash(pass);
     }
 
     await using var cmd = new MySqlCommand("""
@@ -342,7 +377,7 @@ app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest 
     """, con);
 
     cmd.Parameters.AddWithValue("@usuario", usuario);
-    cmd.Parameters.AddWithValue("@clave", pass);
+    cmd.Parameters.AddWithValue("@clave", passHash);
     cmd.Parameters.AddWithValue("@rol", rol);
     cmd.Parameters.AddWithValue("@sucursal_id", sucursalId);
     cmd.Parameters.AddWithValue("@estado", estado);
@@ -388,43 +423,65 @@ app.MapPost("/api/app-mesera/login", async (Db db, LoginRequest req) =>
     await EnsureUserManagementTables(con);
     await EnsureAppMeseraTables(con);
 
+    string usuario = (req.Usuario ?? "").Trim().ToLowerInvariant();
+    string claveIngresada = req.Clave ?? "";
+
+    int id = 0;
+    int sucursalId = 1;
+    string usuarioDb = "";
+    string rol = "";
+    string sucursal = "PRIMERA SUCURSAL";
+    string nombre = "";
+    string claveGuardada = "";
+
     const string sql = """
-        SELECT u.id, u.usuario, u.rol, u.estado, u.sucursal_id,
+        SELECT u.id, u.usuario, u.clave, u.rol, u.estado, u.sucursal_id,
                COALESCE(u.nombre_completo, u.usuario) AS nombre_completo,
                COALESCE(u.caja_nombre, '') AS caja_nombre,
                CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal
         FROM usuarios u
         LEFT JOIN sucursales s ON s.id = u.sucursal_id
-        WHERE u.usuario = @usuario AND u.clave = @clave AND u.estado = 'ACTIVO'
+        WHERE u.usuario = @usuario AND u.estado = 'ACTIVO'
         LIMIT 1;
     """;
 
-    await using var cmd = new MySqlCommand(sql, con);
-    cmd.Parameters.AddWithValue("@usuario", req.Usuario);
-    cmd.Parameters.AddWithValue("@clave", req.Clave);
+    await using (var cmd = new MySqlCommand(sql, con))
+    {
+        cmd.Parameters.AddWithValue("@usuario", usuario);
+        await using var rd = await cmd.ExecuteReaderAsync();
+        if (!await rd.ReadAsync())
+            return Results.Unauthorized();
 
-    await using var rd = await cmd.ExecuteReaderAsync();
-    if (!await rd.ReadAsync())
+        id = rd.GetInt32("id");
+        usuarioDb = rd.GetString("usuario");
+        claveGuardada = rd.GetString("clave");
+        rol = rd.GetString("rol");
+        sucursalId = rd.IsDBNull(rd.GetOrdinal("sucursal_id")) ? 1 : rd.GetInt32("sucursal_id");
+        sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "PRIMERA SUCURSAL" : rd.GetString("sucursal");
+        nombre = rd.IsDBNull(rd.GetOrdinal("nombre_completo")) ? usuarioDb : rd.GetString("nombre_completo");
+    }
+
+    if (!PasswordHasher.Verify(claveIngresada, claveGuardada))
         return Results.Unauthorized();
 
-    string rol = rd.GetString("rol");
     if (!rol.Contains("MESERA", StringComparison.OrdinalIgnoreCase) &&
         !rol.Contains("MESERO", StringComparison.OrdinalIgnoreCase))
     {
         return Results.BadRequest(new { ok = false, message = "Este usuario no tiene rol de mesera." });
     }
 
-    int sucursalId = rd.IsDBNull(rd.GetOrdinal("sucursal_id")) ? 1 : rd.GetInt32("sucursal_id");
+    if (!PasswordHasher.IsHashed(claveGuardada))
+        await UpdateUserPasswordHash(con, id, claveIngresada);
 
     return Results.Ok(new
     {
         ok = true,
-        id = rd.GetInt32("id"),
-        usuario = rd.GetString("usuario"),
-        nombre = rd.IsDBNull(rd.GetOrdinal("nombre_completo")) ? rd.GetString("usuario") : rd.GetString("nombre_completo"),
+        id,
+        usuario = usuarioDb,
+        nombre,
         rol,
         sucursal_id = sucursalId,
-        sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "PRIMERA SUCURSAL" : rd.GetString("sucursal")
+        sucursal
     });
 });
 
@@ -1617,8 +1674,96 @@ static bool EsProductoConComision(string nombre)
 }
 
 
+static async Task UpdateUserPasswordHash(MySqlConnection con, int userId, string plainPassword)
+{
+    await using var cmd = new MySqlCommand("UPDATE usuarios SET clave = @clave WHERE id = @id;", con);
+    cmd.Parameters.AddWithValue("@clave", PasswordHasher.Hash(plainPassword));
+    cmd.Parameters.AddWithValue("@id", userId);
+    await cmd.ExecuteNonQueryAsync();
+}
+
+static async Task HashPlainUserPasswords(MySqlConnection con)
+{
+    var pendientes = new List<(int id, string clave)>();
+
+    await using (var cmd = new MySqlCommand("SELECT id, clave FROM usuarios;", con))
+    await using (var rd = await cmd.ExecuteReaderAsync())
+    {
+        while (await rd.ReadAsync())
+        {
+            string clave = rd.IsDBNull(rd.GetOrdinal("clave")) ? "" : rd.GetString("clave");
+            if (!PasswordHasher.IsHashed(clave))
+                pendientes.Add((rd.GetInt32("id"), clave));
+        }
+    }
+
+    foreach (var item in pendientes)
+    {
+        await using var update = new MySqlCommand("UPDATE usuarios SET clave = @clave WHERE id = @id;", con);
+        update.Parameters.AddWithValue("@clave", PasswordHasher.Hash(item.clave));
+        update.Parameters.AddWithValue("@id", item.id);
+        await update.ExecuteNonQueryAsync();
+    }
+}
+
+static class PasswordHasher
+{
+    const int Iterations = 100000;
+    const int SaltSize = 16;
+    const int KeySize = 32;
+    const string Prefix = "PBKDF2$";
+
+    public static bool IsHashed(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value) && value.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string Hash(string password)
+    {
+        password ??= "";
+        byte[] salt = RandomNumberGenerator.GetBytes(SaltSize);
+        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, Iterations, HashAlgorithmName.SHA256);
+        byte[] key = pbkdf2.GetBytes(KeySize);
+        return Prefix + Iterations + "$" + Convert.ToBase64String(salt) + "$" + Convert.ToBase64String(key);
+    }
+
+    public static bool Verify(string password, string stored)
+    {
+        password ??= "";
+        stored ??= "";
+
+        if (!IsHashed(stored))
+            return stored == password;
+
+        string[] parts = stored.Split('$');
+        if (parts.Length != 4) return false;
+        if (!int.TryParse(parts[1], out int iterations)) return false;
+
+        byte[] salt;
+        byte[] expected;
+        try
+        {
+            salt = Convert.FromBase64String(parts[2]);
+            expected = Convert.FromBase64String(parts[3]);
+        }
+        catch
+        {
+            return false;
+        }
+
+        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, HashAlgorithmName.SHA256);
+        byte[] actual = pbkdf2.GetBytes(expected.Length);
+        return CryptographicOperations.FixedTimeEquals(actual, expected);
+    }
+}
+
 static async Task EnsureUserManagementTables(MySqlConnection con)
 {
+    await using (var alterClave = new MySqlCommand("ALTER TABLE usuarios MODIFY COLUMN clave VARCHAR(255) NOT NULL;", con))
+    {
+        try { await alterClave.ExecuteNonQueryAsync(); } catch { }
+    }
+
     await using (var cmd = new MySqlCommand("ALTER TABLE usuarios ADD COLUMN nombre_completo VARCHAR(180) NULL;", con))
     {
         try { await cmd.ExecuteNonQueryAsync(); } catch { }
@@ -1657,6 +1802,8 @@ static async Task EnsureUserManagementTables(MySqlConnection con)
     {
         try { await seed.ExecuteNonQueryAsync(); } catch { }
     }
+
+    await HashPlainUserPasswords(con);
 }
 
 static string NormalizarRol(string? rol)

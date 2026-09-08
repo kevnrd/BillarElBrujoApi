@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V19_CATALOGO_LOCAL_DULCES",
+            version = "V20_FIX_APP_PRODUCTOS_MESAS",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -350,7 +350,7 @@ app.MapGet("/api/app-mesera/productos", async (Db db, int sucursalId) =>
                p.stock_actual,
                pr.id AS presentacion_id,
                COALESCE(pr.nombre, 'UNIDAD') AS presentacion,
-               COALESCE(pr.precio_venta, pr.precio, 0) AS precio,
+               COALESCE(pr.precio_venta, 0) AS precio,
                COALESCE(p.genera_comision, 0) AS genera_comision,
                COALESCE(p.tipo_comision, 'NINGUNA') AS tipo_comision,
                COALESCE(p.valor_comision, 0) AS valor_comision
@@ -358,7 +358,21 @@ app.MapGet("/api/app-mesera/productos", async (Db db, int sucursalId) =>
         LEFT JOIN presentaciones pr ON pr.producto_id = p.id AND pr.estado = 'ACTIVO'
         WHERE p.sucursal_id = @sucursalId
           AND p.estado = 'ACTIVO'
-        ORDER BY p.nombre, pr.nombre;
+        ORDER BY
+            CASE
+                WHEN p.categoria = 'Bebidas' THEN 1
+                WHEN p.categoria = 'Cervezas' THEN 2
+                WHEN p.categoria = 'Botellas/Tragos' THEN 3
+                WHEN p.categoria = 'Cigarros' THEN 4
+                WHEN p.categoria = 'Dulces' THEN 5
+                WHEN p.categoria = 'Snacks' THEN 6
+                WHEN p.categoria = 'Vasos/Accesorios' THEN 7
+                WHEN p.categoria = 'Varios' THEN 8
+                WHEN p.categoria = 'Combo' THEN 9
+                WHEN p.categoria = 'Promoción' THEN 10
+                ELSE 99
+            END,
+            p.nombre, pr.nombre;
     """;
 
     var rows = await db.QueryAsync(con, sql, new Dictionary<string, object?>
@@ -367,6 +381,29 @@ app.MapGet("/api/app-mesera/productos", async (Db db, int sucursalId) =>
     });
 
     return Results.Ok(rows);
+});
+
+app.MapGet("/api/app-mesera/test", async (Db db, int sucursalId) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+    await EnsureMesasEnVivoTables(con);
+
+    long productos = Convert.ToInt64(await new MySqlCommand("SELECT COUNT(*) FROM productos WHERE sucursal_id = " + sucursalId + " AND estado = 'ACTIVO';", con).ExecuteScalarAsync() ?? 0);
+    long presentaciones = Convert.ToInt64(await new MySqlCommand("SELECT COUNT(*) FROM presentaciones pr INNER JOIN productos p ON p.id = pr.producto_id WHERE p.sucursal_id = " + sucursalId + " AND pr.estado = 'ACTIVO';", con).ExecuteScalarAsync() ?? 0);
+    long mesasVivas = Convert.ToInt64(await new MySqlCommand("SELECT COUNT(*) FROM mesa_estados WHERE sucursal_id = " + sucursalId + ";", con).ExecuteScalarAsync() ?? 0);
+    long pedidosPendientes = Convert.ToInt64(await new MySqlCommand("SELECT COUNT(*) FROM pedidos_movil WHERE sucursal_id = " + sucursalId + " AND estado = 'PENDIENTE';", con).ExecuteScalarAsync() ?? 0);
+
+    return Results.Ok(new
+    {
+        ok = true,
+        version = "V20_FIX_APP_PRODUCTOS_MESAS",
+        sucursalId,
+        productos,
+        presentaciones,
+        mesasVivas,
+        pedidosPendientes
+    });
 });
 
 app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) =>

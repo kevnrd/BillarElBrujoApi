@@ -1,0 +1,18 @@
+BILLAR EL BRUJO API - V19 CATÁLOGO LOCAL DULCES
+
+Subir a Railway para que la app de meseras vea el catálogo del local ordenado.
+
+Novedades:
+- Endpoint para cargar catálogo local:
+  /api/admin/cargar-catalogo-local?clave=ENTREGAR_LIMPIO_2026
+- Carga productos con nombre + P. Venta.
+- Ordena categorías: Bebidas, Cervezas, Botellas/Tragos, Cigarros, Dulces, Snacks, Vasos/Accesorios, Varios, Combo, Promoción.
+- Incluye dulces: chicle, chupete, mabel, clorets, halls, pastillas, etc.
+- Incluye combos y promociones.
+- Marca comisión automática para botellas/tragos principales con 10% inicial, editable después en base de datos/programa.
+
+Después de subir:
+1. Abrir /health y verificar V19_CATALOGO_LOCAL_DULCES.
+2. Abrir:
+   /api/admin/cargar-catalogo-local?clave=ENTREGAR_LIMPIO_2026
+3. Abrir la app mesera y actualizar productos.

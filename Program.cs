@@ -41,7 +41,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V16_FIX_VALUERANGE",
+            version = "V19_CATALOGO_LOCAL_DULCES",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -97,6 +97,146 @@ app.MapGet("/api/sheets/sync", async (Db db, SheetsReporter sheets) =>
     }
 });
 
+app.MapPost("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, string clave, bool? syncSheets) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+
+    if (clave != cleanKey)
+        return Results.Unauthorized();
+
+    string[] tables =
+    {
+        "detalle_ventas",
+        "ventas",
+        "cobros_mesa",
+        "propinas",
+        "reservas",
+        "mesa_consumos_vivos",
+        "mesa_estados",
+        "detalle_pedidos_movil",
+        "pedidos_movil",
+        "comisiones_meseras"
+    };
+
+    List<string> cleaned = new();
+    List<string> warnings = new();
+
+    await using var con = await db.OpenAsync();
+
+    await using (var fkOff = new MySqlCommand("SET FOREIGN_KEY_CHECKS = 0;", con))
+        await fkOff.ExecuteNonQueryAsync();
+
+    foreach (string table in tables)
+    {
+        try
+        {
+            await using var cmd = new MySqlCommand("TRUNCATE TABLE " + table + ";", con);
+            await cmd.ExecuteNonQueryAsync();
+            cleaned.Add(table);
+        }
+        catch (Exception ex)
+        {
+            warnings.Add(table + ": " + ex.Message);
+        }
+    }
+
+    await using (var fkOn = new MySqlCommand("SET FOREIGN_KEY_CHECKS = 1;", con))
+        await fkOn.ExecuteNonQueryAsync();
+
+    string sheetsMessage = "Google Sheets no sincronizado.";
+    if (syncSheets == true && sheets.IsConfigured)
+    {
+        try
+        {
+            sheetsMessage = await sheets.SyncFromDatabaseAsync(db);
+        }
+        catch (Exception ex)
+        {
+            sheetsMessage = "Railway quedó limpio, pero Google Sheets no se pudo actualizar ahora: " + ex.Message;
+        }
+    }
+
+    return Results.Ok(new
+    {
+        ok = true,
+        message = "Datos de prueba limpiados para entregar al cliente.",
+        cleaned,
+        warnings,
+        googleSheets = sheetsMessage,
+        note = "No se borraron usuarios, sucursales, mesas ni productos."
+    });
+});
+
+app.MapGet("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, string clave, bool? syncSheets) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+
+    if (clave != cleanKey)
+        return Results.Unauthorized();
+
+    string[] tables =
+    {
+        "detalle_ventas",
+        "ventas",
+        "cobros_mesa",
+        "propinas",
+        "reservas",
+        "mesa_consumos_vivos",
+        "mesa_estados",
+        "detalle_pedidos_movil",
+        "pedidos_movil",
+        "comisiones_meseras"
+    };
+
+    List<string> cleaned = new();
+    List<string> warnings = new();
+
+    await using var con = await db.OpenAsync();
+
+    await using (var fkOff = new MySqlCommand("SET FOREIGN_KEY_CHECKS = 0;", con))
+        await fkOff.ExecuteNonQueryAsync();
+
+    foreach (string table in tables)
+    {
+        try
+        {
+            await using var cmd = new MySqlCommand("TRUNCATE TABLE " + table + ";", con);
+            await cmd.ExecuteNonQueryAsync();
+            cleaned.Add(table);
+        }
+        catch (Exception ex)
+        {
+            warnings.Add(table + ": " + ex.Message);
+        }
+    }
+
+    await using (var fkOn = new MySqlCommand("SET FOREIGN_KEY_CHECKS = 1;", con))
+        await fkOn.ExecuteNonQueryAsync();
+
+    string sheetsMessage = "Google Sheets no sincronizado.";
+    if (syncSheets == true && sheets.IsConfigured)
+    {
+        try
+        {
+            sheetsMessage = await sheets.SyncFromDatabaseAsync(db);
+        }
+        catch (Exception ex)
+        {
+            sheetsMessage = "Railway quedó limpio, pero Google Sheets no se pudo actualizar ahora: " + ex.Message;
+        }
+    }
+
+    return Results.Ok(new
+    {
+        ok = true,
+        message = "Datos de prueba limpiados para entregar al cliente.",
+        cleaned,
+        warnings,
+        googleSheets = sheetsMessage,
+        note = "No se borraron usuarios, sucursales, mesas ni productos."
+    });
+});
+
 app.MapPost("/api/login", async (Db db, LoginRequest req) =>
 {
     await using var con = await db.OpenAsync();
@@ -124,6 +264,307 @@ app.MapPost("/api/login", async (Db db, LoginRequest req) =>
         rol = rd.GetString("rol"),
         sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "TODAS" : rd.GetString("sucursal")
     });
+});
+
+app.MapPost("/api/app-mesera/login", async (Db db, LoginRequest req) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    const string sql = """
+        SELECT u.id, u.usuario, u.rol, u.estado, u.sucursal_id,
+               CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal
+        FROM usuarios u
+        LEFT JOIN sucursales s ON s.id = u.sucursal_id
+        WHERE u.usuario = @usuario AND u.clave = @clave AND u.estado = 'ACTIVO'
+        LIMIT 1;
+    """;
+
+    await using var cmd = new MySqlCommand(sql, con);
+    cmd.Parameters.AddWithValue("@usuario", req.Usuario);
+    cmd.Parameters.AddWithValue("@clave", req.Clave);
+
+    await using var rd = await cmd.ExecuteReaderAsync();
+    if (!await rd.ReadAsync())
+        return Results.Unauthorized();
+
+    string rol = rd.GetString("rol");
+    if (!rol.Contains("MESERA", StringComparison.OrdinalIgnoreCase) &&
+        !rol.Contains("MESERO", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.BadRequest(new { ok = false, message = "Este usuario no tiene rol de mesera." });
+    }
+
+    int sucursalId = rd.IsDBNull(rd.GetOrdinal("sucursal_id")) ? 1 : rd.GetInt32("sucursal_id");
+
+    return Results.Ok(new
+    {
+        ok = true,
+        id = rd.GetInt32("id"),
+        usuario = rd.GetString("usuario"),
+        nombre = rd.GetString("usuario"),
+        rol,
+        sucursal_id = sucursalId,
+        sucursal = rd.IsDBNull(rd.GetOrdinal("sucursal")) ? "PRIMERA SUCURSAL" : rd.GetString("sucursal")
+    });
+});
+
+app.MapGet("/api/app-mesera/mesas", async (Db db, int sucursalId) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+    await EnsureMesasEnVivoTables(con);
+
+    const string sql = """
+        SELECT m.id AS mesa_id,
+               m.nombre AS mesa,
+               COALESCE(me.estado, m.estado, 'LIBRE') AS estado,
+               COALESCE(me.total_consumo, 0) AS total_consumo,
+               me.fin_programado,
+               me.cajero
+        FROM mesas m
+        LEFT JOIN mesa_estados me
+            ON me.sucursal_id = m.sucursal_id AND me.mesa_id = m.id
+        WHERE m.sucursal_id = @sucursalId
+          AND m.estado <> 'INACTIVA'
+        ORDER BY m.id;
+    """;
+
+    var rows = await db.QueryAsync(con, sql, new Dictionary<string, object?>
+    {
+        ["@sucursalId"] = sucursalId
+    });
+
+    return Results.Ok(rows);
+});
+
+app.MapGet("/api/app-mesera/productos", async (Db db, int sucursalId) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    const string sql = """
+        SELECT p.id AS producto_id,
+               p.nombre AS producto,
+               p.categoria,
+               p.stock_actual,
+               pr.id AS presentacion_id,
+               COALESCE(pr.nombre, 'UNIDAD') AS presentacion,
+               COALESCE(pr.precio_venta, pr.precio, 0) AS precio,
+               COALESCE(p.genera_comision, 0) AS genera_comision,
+               COALESCE(p.tipo_comision, 'NINGUNA') AS tipo_comision,
+               COALESCE(p.valor_comision, 0) AS valor_comision
+        FROM productos p
+        LEFT JOIN presentaciones pr ON pr.producto_id = p.id AND pr.estado = 'ACTIVO'
+        WHERE p.sucursal_id = @sucursalId
+          AND p.estado = 'ACTIVO'
+        ORDER BY p.nombre, pr.nombre;
+    """;
+
+    var rows = await db.QueryAsync(con, sql, new Dictionary<string, object?>
+    {
+        ["@sucursalId"] = sucursalId
+    });
+
+    return Results.Ok(rows);
+});
+
+app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    decimal subtotal = req.Cantidad * req.PrecioUnitario;
+    string syncKey = string.IsNullOrWhiteSpace(req.SyncKey) ? Guid.NewGuid().ToString("N") : req.SyncKey;
+
+    await using var tx = await con.BeginTransactionAsync();
+
+    try
+    {
+        const string pedidoSql = """
+            INSERT INTO pedidos_movil
+                (sucursal_id, mesa_id, mesa, mesera_usuario, mesera_nombre, fecha, estado, total, observacion, sync_key)
+            VALUES
+                (@sucursal_id, @mesa_id, @mesa, @mesera_usuario, @mesera_nombre, NOW(), 'PENDIENTE', @total, @observacion, @sync_key)
+            ON DUPLICATE KEY UPDATE
+                total = VALUES(total),
+                observacion = VALUES(observacion);
+            SELECT id FROM pedidos_movil WHERE sync_key = @sync_key LIMIT 1;
+        """;
+
+        await using var pedidoCmd = new MySqlCommand(pedidoSql, con, tx);
+        pedidoCmd.Parameters.AddWithValue("@sucursal_id", req.SucursalId);
+        pedidoCmd.Parameters.AddWithValue("@mesa_id", req.MesaId);
+        pedidoCmd.Parameters.AddWithValue("@mesa", req.Mesa);
+        pedidoCmd.Parameters.AddWithValue("@mesera_usuario", req.MeseraUsuario);
+        pedidoCmd.Parameters.AddWithValue("@mesera_nombre", req.MeseraNombre);
+        pedidoCmd.Parameters.AddWithValue("@total", subtotal);
+        pedidoCmd.Parameters.AddWithValue("@observacion", req.Observacion ?? "");
+        pedidoCmd.Parameters.AddWithValue("@sync_key", syncKey);
+
+        long pedidoId = Convert.ToInt64(await pedidoCmd.ExecuteScalarAsync());
+
+        await using (var del = new MySqlCommand("DELETE FROM detalle_pedidos_movil WHERE pedido_id = @pedido_id;", con, tx))
+        {
+            del.Parameters.AddWithValue("@pedido_id", pedidoId);
+            await del.ExecuteNonQueryAsync();
+        }
+
+        const string detSql = """
+            INSERT INTO detalle_pedidos_movil
+                (pedido_id, producto_id, presentacion_id, producto, presentacion, cantidad, precio_unitario, subtotal,
+                 genera_comision, tipo_comision, valor_comision, comision_calculada)
+            VALUES
+                (@pedido_id, @producto_id, @presentacion_id, @producto, @presentacion, @cantidad, @precio_unitario, @subtotal,
+                 @genera_comision, @tipo_comision, @valor_comision, @comision_calculada);
+        """;
+
+        decimal comision = req.GeneraComision
+            ? (req.TipoComision.Equals("PORCENTAJE", StringComparison.OrdinalIgnoreCase)
+                ? subtotal * (req.ValorComision / 100M)
+                : req.ValorComision * req.Cantidad)
+            : 0M;
+
+        await using var detCmd = new MySqlCommand(detSql, con, tx);
+        detCmd.Parameters.AddWithValue("@pedido_id", pedidoId);
+        detCmd.Parameters.AddWithValue("@producto_id", req.ProductoId);
+        detCmd.Parameters.AddWithValue("@presentacion_id", req.PresentacionId);
+        detCmd.Parameters.AddWithValue("@producto", req.Producto);
+        detCmd.Parameters.AddWithValue("@presentacion", req.Presentacion);
+        detCmd.Parameters.AddWithValue("@cantidad", req.Cantidad);
+        detCmd.Parameters.AddWithValue("@precio_unitario", req.PrecioUnitario);
+        detCmd.Parameters.AddWithValue("@subtotal", subtotal);
+        detCmd.Parameters.AddWithValue("@genera_comision", req.GeneraComision);
+        detCmd.Parameters.AddWithValue("@tipo_comision", req.TipoComision ?? "NINGUNA");
+        detCmd.Parameters.AddWithValue("@valor_comision", req.ValorComision);
+        detCmd.Parameters.AddWithValue("@comision_calculada", comision);
+        await detCmd.ExecuteNonQueryAsync();
+
+        await tx.CommitAsync();
+
+        return Results.Ok(new
+        {
+            ok = true,
+            pedido_id = pedidoId,
+            estado = "PENDIENTE",
+            total = subtotal,
+            comision_calculada = comision,
+            message = "Pedido enviado a caja."
+        });
+    }
+    catch (Exception ex)
+    {
+        await tx.RollbackAsync();
+        return Results.Problem("No se pudo registrar el pedido móvil: " + ex.Message);
+    }
+});
+
+app.MapGet("/api/app-mesera/pedidos-pendientes", async (Db db, int sucursalId) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    const string sql = """
+        SELECT p.id, p.sucursal_id, p.mesa_id, p.mesa, p.mesera_usuario, p.mesera_nombre,
+               p.fecha, p.estado, p.total, p.observacion,
+               d.producto_id, d.presentacion_id, d.producto, d.presentacion, d.cantidad,
+               d.precio_unitario, d.subtotal, d.genera_comision, d.tipo_comision, d.valor_comision,
+               d.comision_calculada
+        FROM pedidos_movil p
+        INNER JOIN detalle_pedidos_movil d ON d.pedido_id = p.id
+        WHERE p.sucursal_id = @sucursalId
+          AND p.estado = 'PENDIENTE'
+        ORDER BY p.fecha;
+    """;
+
+    return Results.Ok(await db.QueryAsync(con, sql, new Dictionary<string, object?>
+    {
+        ["@sucursalId"] = sucursalId
+    }));
+});
+
+app.MapPost("/api/app-mesera/pedidos/{id:long}/estado", async (Db db, SheetsReporter sheets, long id, PedidoEstadoRequest req) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    string estado = (req.Estado ?? "").Trim().ToUpperInvariant();
+    if (estado != "ACEPTADO" && estado != "RECHAZADO" && estado != "ENTREGADO")
+        return Results.BadRequest(new { ok = false, message = "Estado inválido." });
+
+    await using var tx = await con.BeginTransactionAsync();
+
+    try
+    {
+        const string updateSql = """
+            UPDATE pedidos_movil
+            SET estado = @estado,
+                cajero_usuario = @cajero,
+                fecha_respuesta = NOW()
+            WHERE id = @id;
+        """;
+
+        await using var cmd = new MySqlCommand(updateSql, con, tx);
+        cmd.Parameters.AddWithValue("@estado", estado);
+        cmd.Parameters.AddWithValue("@cajero", req.CajeroUsuario ?? "");
+        cmd.Parameters.AddWithValue("@id", id);
+        await cmd.ExecuteNonQueryAsync();
+
+        if (estado == "ACEPTADO" || estado == "ENTREGADO")
+        {
+            const string comSql = """
+                INSERT INTO comisiones_meseras
+                    (pedido_id, sucursal_id, mesa_id, mesera_usuario, mesera_nombre, fecha,
+                     producto, cantidad, venta_total, comision_total, estado)
+                SELECT p.id, p.sucursal_id, p.mesa_id, p.mesera_usuario, p.mesera_nombre, NOW(),
+                       d.producto, d.cantidad, d.subtotal, d.comision_calculada, 'PENDIENTE_PAGO'
+                FROM pedidos_movil p
+                INNER JOIN detalle_pedidos_movil d ON d.pedido_id = p.id
+                WHERE p.id = @id AND d.comision_calculada > 0
+                ON DUPLICATE KEY UPDATE
+                    venta_total = VALUES(venta_total),
+                    comision_total = VALUES(comision_total),
+                    estado = VALUES(estado);
+            """;
+
+            await using var comCmd = new MySqlCommand(comSql, con, tx);
+            comCmd.Parameters.AddWithValue("@id", id);
+            await comCmd.ExecuteNonQueryAsync();
+        }
+
+        await tx.CommitAsync();
+        await TrySyncSheets(db, sheets);
+
+        return Results.Ok(new { ok = true, pedido_id = id, estado });
+    }
+    catch (Exception ex)
+    {
+        await tx.RollbackAsync();
+        return Results.Problem("No se pudo cambiar estado del pedido: " + ex.Message);
+    }
+});
+
+app.MapGet("/api/app-mesera/comisiones", async (Db db, int sucursalId, string? meseraUsuario) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    const string sql = """
+        SELECT sucursal_id, mesera_usuario, mesera_nombre, DATE(fecha) AS fecha,
+               SUM(venta_total) AS total_vendido,
+               SUM(comision_total) AS total_comision
+        FROM comisiones_meseras
+        WHERE sucursal_id = @sucursalId
+          AND (@meseraUsuario IS NULL OR mesera_usuario = @meseraUsuario)
+        GROUP BY sucursal_id, mesera_usuario, mesera_nombre, DATE(fecha)
+        ORDER BY fecha DESC, mesera_nombre;
+    """;
+
+    return Results.Ok(await db.QueryAsync(con, sql, new Dictionary<string, object?>
+    {
+        ["@sucursalId"] = sucursalId,
+        ["@meseraUsuario"] = meseraUsuario
+    }));
 });
 
 app.MapGet("/api/sucursales", async (Db db) =>
@@ -163,7 +604,21 @@ app.MapGet("/api/productos", async (Db db, int? sucursalId) =>
         FROM productos p
         INNER JOIN sucursales s ON s.id = p.sucursal_id
         WHERE (@sucursalId IS NULL OR p.sucursal_id = @sucursalId)
-        ORDER BY p.sucursal_id, p.nombre;
+        ORDER BY p.sucursal_id,
+                 CASE
+                    WHEN p.categoria = 'Bebidas' THEN 1
+                    WHEN p.categoria = 'Cervezas' THEN 2
+                    WHEN p.categoria = 'Botellas/Tragos' THEN 3
+                    WHEN p.categoria = 'Cigarros' THEN 4
+                    WHEN p.categoria = 'Dulces' THEN 5
+                    WHEN p.categoria = 'Snacks' THEN 6
+                    WHEN p.categoria = 'Vasos/Accesorios' THEN 7
+                    WHEN p.categoria = 'Varios' THEN 8
+                    WHEN p.categoria = 'Combo' THEN 9
+                    WHEN p.categoria = 'Promoción' THEN 10
+                    ELSE 99
+                 END,
+                 p.nombre;
     """;
 
     var rows = await db.QueryAsync(con, sql, new Dictionary<string, object?>
@@ -172,6 +627,80 @@ app.MapGet("/api/productos", async (Db db, int? sucursalId) =>
     });
 
     return Results.Ok(rows);
+});
+
+app.MapPost("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    int insertados = 0;
+    int actualizados = 0;
+
+    foreach (int sucursalId in new[] { 1, 2 })
+    {
+        foreach (var item in CatalogoProductosLocalV19())
+        {
+            bool updated = await UpsertCatalogoProductoLocal(con, sucursalId, item.nombre, item.categoria, item.precio, "Unidad", 5);
+            if (updated) actualizados++; else insertados++;
+        }
+
+        foreach (var item in CatalogoCombosPromosLocalV19())
+        {
+            bool updated = await UpsertCatalogoProductoLocal(con, sucursalId, item.nombre, item.categoria, item.precio, item.detalle, 2);
+            if (updated) actualizados++; else insertados++;
+        }
+    }
+
+    return Results.Ok(new
+    {
+        ok = true,
+        version = "V19_CATALOGO_LOCAL_DULCES",
+        message = "Catálogo local cargado en Railway: productos, dulces, combos y promociones.",
+        insertados,
+        actualizados,
+        nota = "No se cargó PRUEBA porque parece dato de prueba."
+    });
+});
+
+app.MapGet("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    int insertados = 0;
+    int actualizados = 0;
+
+    foreach (int sucursalId in new[] { 1, 2 })
+    {
+        foreach (var item in CatalogoProductosLocalV19())
+        {
+            bool updated = await UpsertCatalogoProductoLocal(con, sucursalId, item.nombre, item.categoria, item.precio, "Unidad", 5);
+            if (updated) actualizados++; else insertados++;
+        }
+
+        foreach (var item in CatalogoCombosPromosLocalV19())
+        {
+            bool updated = await UpsertCatalogoProductoLocal(con, sucursalId, item.nombre, item.categoria, item.precio, item.detalle, 2);
+            if (updated) actualizados++; else insertados++;
+        }
+    }
+
+    return Results.Ok(new
+    {
+        ok = true,
+        version = "V19_CATALOGO_LOCAL_DULCES",
+        message = "Catálogo local cargado en Railway: productos, dulces, combos y promociones.",
+        insertados,
+        actualizados,
+        nota = "No se cargó PRUEBA porque parece dato de prueba."
+    });
 });
 
 app.MapPost("/api/productos", async (Db db, SheetsReporter sheets, ProductoRequest p) =>
@@ -720,6 +1249,316 @@ static async Task TrySyncSheets(Db db, SheetsReporter sheets)
     }
 }
 
+
+static (string nombre, string categoria, decimal precio)[] CatalogoProductosLocalV19() => new (string nombre, string categoria, decimal precio)[]
+{
+    ("AGUA 2 LITROS", "Bebidas", 20.00m),
+    ("AGUA PERSONAL CON GAS", "Bebidas", 10.00m),
+    ("AGUA PERSONAL SIN GAS", "Bebidas", 10.00m),
+    ("AGUA TONICA", "Bebidas", 20.00m),
+    ("CICLON", "Bebidas", 20.00m),
+    ("COCA EL BRUJO MARACUYA", "Bebidas", 25.00m),
+    ("COCA EL BRUJO MEDUSA", "Bebidas", 35.00m),
+    ("COCA EL BRUJO RED BULL", "Bebidas", 25.00m),
+    ("COCA EL BRUJO SANDIA RED BULL", "Bebidas", 25.00m),
+    ("COCA EL BRUJO YOGOURT RED BULL", "Bebidas", 25.00m),
+    ("COCA EL BRUJO YOGUBOLL", "Bebidas", 25.00m),
+    ("FLOW ACHACHAIRU", "Bebidas", 25.00m),
+    ("FLOW CHUFLAY", "Bebidas", 25.00m),
+    ("FLOW SIN AZUCAR", "Bebidas", 25.00m),
+    ("POWER CHICO", "Bebidas", 18.00m),
+    ("POWER GRANDE", "Bebidas", 25.00m),
+    ("RED BULL", "Bebidas", 30.00m),
+    ("SODA COCA COLA 2 LITROS", "Bebidas", 25.00m),
+    ("SODA COCA COLA 3 LITROS", "Bebidas", 30.00m),
+    ("SODA FANTA 2 LITROS", "Bebidas", 25.00m),
+    ("SODA PEQUE COCA COLA VARIOS", "Bebidas", 6.00m),
+    ("SODA SPRITE 2 LITROS", "Bebidas", 25.00m),
+    ("VASOS DE SODA", "Bebidas", 10.00m),
+    ("CERVEZA AMSTEL", "Cervezas", 22.00m),
+    ("CERVEZA CONTI", "Cervezas", 20.00m),
+    ("CERVEZA CORONA", "Cervezas", 25.00m),
+    ("CERVEZA PACEÑA", "Cervezas", 30.00m),
+    ("CERVEZA SKUL", "Cervezas", 10.00m),
+    ("BLACK", "Botellas/Tragos", 20.00m),
+    ("FERNET", "Botellas/Tragos", 275.00m),
+    ("FOUR LOCO", "Botellas/Tragos", 70.00m),
+    ("GIN ROSADO", "Botellas/Tragos", 275.00m),
+    ("ICE 51", "Botellas/Tragos", 30.00m),
+    ("NOCHE ICE", "Botellas/Tragos", 25.00m),
+    ("QUISQUE BLACK LABEL", "Botellas/Tragos", 800.00m),
+    ("RON ABUELO", "Botellas/Tragos", 300.00m),
+    ("RON DE COCO OLD", "Botellas/Tragos", 300.00m),
+    ("RON FLOR DE CAÑA", "Botellas/Tragos", 275.00m),
+    ("RON HABANA 7 AÑOS", "Botellas/Tragos", 425.00m),
+    ("TEQUILA JOSE CUERVO", "Botellas/Tragos", 200.00m),
+    ("VASO DE FERNET + COCA COLA 2L E 3L", "Botellas/Tragos", 20.00m),
+    ("VASO DE RON", "Botellas/Tragos", 20.00m),
+    ("VASO DE WISKIE", "Botellas/Tragos", 10.00m),
+    ("VINO BLANCO", "Botellas/Tragos", 50.00m),
+    ("VINO TINTO", "Botellas/Tragos", 50.00m),
+    ("CIGARRO BOHEM DOUBLE GRANDE", "Cigarros", 30.00m),
+    ("CIGARRO BOHEM UND", "Cigarros", 2.00m),
+    ("CIGARRO BOHEN BLACK", "Cigarros", 30.00m),
+    ("CIGARRO BOHEN SANDIA", "Cigarros", 25.00m),
+    ("CIGARRO BOHEN UNIDAD", "Cigarros", 2.00m),
+    ("CIGARRO BOHEN YOGOURT", "Cigarros", 25.00m),
+    ("CIGARRO CAMEL ACTIVA UNID", "Cigarros", 2.00m),
+    ("CIGARRO CAMEL ATIVO CHICO", "Cigarros", 18.00m),
+    ("CIGARRO CAMEL GRANDE ACTIVA", "Cigarros", 30.00m),
+    ("CIGARRO CAMEL SANDI UNIDAD", "Cigarros", 2.00m),
+    ("CIGARRO CAMEL SANDIA CHICO", "Cigarros", 20.00m),
+    ("CIGARRO CAMEL SANDIA GRANDE", "Cigarros", 30.00m),
+    ("CIGARRO HILLS SANDI", "Cigarros", 18.00m),
+    ("CIGARRO HILS", "Cigarros", 18.00m),
+    ("BICO SABORES", "Dulces", 5.00m),
+    ("CHICLE", "Dulces", 1.00m),
+    ("CHICLE GRANDE", "Dulces", 4.00m),
+    ("CHICLE PEQUEÑO", "Dulces", 1.00m),
+    ("CHUPETE", "Dulces", 2.00m),
+    ("CLORETS", "Dulces", 1.00m),
+    ("COCA EL BRUJO BICO STEVIA", "Dulces", 25.00m),
+    ("COCA EL BRUJO CHICLE", "Dulces", 25.00m),
+    ("DOCILE MINTY", "Dulces", 5.00m),
+    ("GROSSO", "Dulces", 1.00m),
+    ("HALLS", "Dulces", 8.00m),
+    ("MABEL", "Dulces", 6.00m),
+    ("PASTILLAS EUCALIPTO", "Dulces", 0.50m),
+    ("PASTILLAS MINT", "Dulces", 0.50m),
+    ("MIX NAX", "Snacks", 8.00m),
+    ("NACHO MAX QUESO", "Snacks", 5.00m),
+    ("NACHO NORMAL", "Snacks", 5.00m),
+    ("NACHOS PICANTES", "Snacks", 5.00m),
+    ("PAPA NAX", "Snacks", 5.00m),
+    ("PAPAS NORMALES", "Snacks", 5.00m),
+    ("PAPAS PICANTES", "Snacks", 5.00m),
+    ("PIZONES CHOCOLATE", "Snacks", 5.00m),
+    ("PIZONES PICANTES", "Snacks", 5.00m),
+    ("PLATANITO CHIPS", "Snacks", 5.00m),
+    ("SANTE GRANDE", "Snacks", 25.00m),
+    ("SANTE PEQUEÑO", "Snacks", 18.00m),
+    ("TAKIS", "Snacks", 8.00m),
+    ("CINCERO", "Vasos/Accesorios", 10.00m),
+    ("COPAS DE VINO", "Vasos/Accesorios", 10.00m),
+    ("ENCENDEDOR", "Vasos/Accesorios", 3.00m),
+    ("VASO TEQUILERO", "Vasos/Accesorios", 10.00m),
+    ("VASOS CERVECEROS", "Vasos/Accesorios", 10.00m),
+    ("ALIKAL", "Varios", 10.00m),
+    ("BELDEN", "Varios", 8.00m)
+};
+
+static (string nombre, string categoria, decimal precio, string detalle)[] CatalogoCombosPromosLocalV19() => new (string nombre, string categoria, decimal precio, string detalle)[]
+{
+    ("COMBO FERNET", "Combo", 300.00m, "1x FERNET + 1x SODA COCA COLA 2 LITROS"),
+    ("COMBO FLOR DE CAÑA", "Combo", 300.00m, "1x RON FLOR DE CAÑA + 1x SODA COCA COLA 2 LITROS"),
+    ("COMBO GIN", "Combo", 300.00m, "1x SANTE GRANDE + 1x GIN ROSADO"),
+    ("COMBO HABANA", "Combo", 450.00m, "1x RON HABANA 7 AÑOS + 1x SODA COCA COLA 2 LITROS"),
+    ("PROMO AMSTEL", "Promoción", 100.00m, "5x CERVEZA AMSTEL"),
+    ("PROMO AMSTEL X 3", "Promoción", 60.00m, "3x CERVEZA AMSTEL"),
+    ("PROMO CONTI", "Promoción", 100.00m, "5x CERVEZA CONTI"),
+    ("PROMO CONTI X 3", "Promoción", 60.00m, "3x CERVEZA CONTI"),
+    ("PROMO CORONA", "Promoción", 110.00m, "5x CERVEZA CORONA"),
+    ("PROMO PACEÑA", "Promoción", 120.00m, "5x CERVEZA PACEÑA"),
+    ("PROMO VASO DE FERNET", "Promoción", 15.00m, "1x VASO DE FERNET")
+};
+
+static async Task<bool> UpsertCatalogoProductoLocal(MySqlConnection con, int sucursalId, string nombre, string categoria, decimal precio, string presentacion, int minimo)
+{
+    long productoId = 0;
+
+    await using (var buscar = new MySqlCommand("SELECT id FROM productos WHERE sucursal_id = @sucursal_id AND nombre = @nombre LIMIT 1;", con))
+    {
+        buscar.Parameters.AddWithValue("@sucursal_id", sucursalId);
+        buscar.Parameters.AddWithValue("@nombre", nombre);
+        object? found = await buscar.ExecuteScalarAsync();
+        if (found != null) productoId = Convert.ToInt64(found);
+    }
+
+    bool existed = productoId > 0;
+
+    if (!existed)
+    {
+        await using var cmd = new MySqlCommand("""
+            INSERT INTO productos
+                (sucursal_id, nombre, categoria, unidad_base, stock_actual, stock_minimo, estado, genera_comision, tipo_comision, valor_comision)
+            VALUES
+                (@sucursal_id, @nombre, @categoria, 'UNIDAD', 0, @minimo, 'ACTIVO', @genera_comision, @tipo_comision, @valor_comision);
+            SELECT LAST_INSERT_ID();
+        """, con);
+        cmd.Parameters.AddWithValue("@sucursal_id", sucursalId);
+        cmd.Parameters.AddWithValue("@nombre", nombre);
+        cmd.Parameters.AddWithValue("@categoria", categoria);
+        cmd.Parameters.AddWithValue("@minimo", minimo);
+        cmd.Parameters.AddWithValue("@genera_comision", EsProductoConComision(nombre));
+        cmd.Parameters.AddWithValue("@tipo_comision", EsProductoConComision(nombre) ? "PORCENTAJE" : "NINGUNA");
+        cmd.Parameters.AddWithValue("@valor_comision", EsProductoConComision(nombre) ? 10 : 0);
+        productoId = Convert.ToInt64(await cmd.ExecuteScalarAsync());
+    }
+    else
+    {
+        await using var cmd = new MySqlCommand("""
+            UPDATE productos
+            SET categoria = @categoria,
+                unidad_base = 'UNIDAD',
+                stock_minimo = @minimo,
+                estado = 'ACTIVO',
+                genera_comision = @genera_comision,
+                tipo_comision = @tipo_comision,
+                valor_comision = @valor_comision
+            WHERE id = @id;
+        """, con);
+        cmd.Parameters.AddWithValue("@categoria", categoria);
+        cmd.Parameters.AddWithValue("@minimo", minimo);
+        cmd.Parameters.AddWithValue("@genera_comision", EsProductoConComision(nombre));
+        cmd.Parameters.AddWithValue("@tipo_comision", EsProductoConComision(nombre) ? "PORCENTAJE" : "NINGUNA");
+        cmd.Parameters.AddWithValue("@valor_comision", EsProductoConComision(nombre) ? 10 : 0);
+        cmd.Parameters.AddWithValue("@id", productoId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    long presId = 0;
+    await using (var buscarPres = new MySqlCommand("SELECT id FROM presentaciones WHERE producto_id = @producto_id AND estado = 'ACTIVO' LIMIT 1;", con))
+    {
+        buscarPres.Parameters.AddWithValue("@producto_id", productoId);
+        object? foundPres = await buscarPres.ExecuteScalarAsync();
+        if (foundPres != null) presId = Convert.ToInt64(foundPres);
+    }
+
+    if (presId <= 0)
+    {
+        await using var cmd = new MySqlCommand("""
+            INSERT INTO presentaciones (producto_id, nombre, cantidad_base, precio_venta, estado)
+            VALUES (@producto_id, @nombre, 1, @precio_venta, 'ACTIVO');
+        """, con);
+        cmd.Parameters.AddWithValue("@producto_id", productoId);
+        cmd.Parameters.AddWithValue("@nombre", presentacion);
+        cmd.Parameters.AddWithValue("@precio_venta", precio);
+        await cmd.ExecuteNonQueryAsync();
+    }
+    else
+    {
+        await using var cmd = new MySqlCommand("""
+            UPDATE presentaciones
+            SET nombre = @nombre,
+                cantidad_base = 1,
+                precio_venta = @precio_venta,
+                estado = 'ACTIVO'
+            WHERE id = @id;
+        """, con);
+        cmd.Parameters.AddWithValue("@nombre", presentacion);
+        cmd.Parameters.AddWithValue("@precio_venta", precio);
+        cmd.Parameters.AddWithValue("@id", presId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    return existed;
+}
+
+static bool EsProductoConComision(string nombre)
+{
+    string n = (nombre ?? "").ToUpperInvariant();
+    return n.Contains("RON") || n.Contains("TEQUILA") || n.Contains("GIN") || n.Contains("FERNET") || n.Contains("WHISK") || n.Contains("WISKIE") || n.Contains("ABUELO") || n.Contains("HABANA") || n.Contains("BLACK LABEL");
+}
+
+static async Task EnsureAppMeseraTables(MySqlConnection con)
+{
+    await using (var alter1 = new MySqlCommand("ALTER TABLE productos ADD COLUMN genera_comision TINYINT(1) NOT NULL DEFAULT 0;", con))
+    {
+        try { await alter1.ExecuteNonQueryAsync(); } catch { }
+    }
+
+    await using (var alter2 = new MySqlCommand("ALTER TABLE productos ADD COLUMN tipo_comision VARCHAR(30) NOT NULL DEFAULT 'NINGUNA';", con))
+    {
+        try { await alter2.ExecuteNonQueryAsync(); } catch { }
+    }
+
+    await using (var alter3 = new MySqlCommand("ALTER TABLE productos ADD COLUMN valor_comision DECIMAL(10,2) NOT NULL DEFAULT 0;", con))
+    {
+        try { await alter3.ExecuteNonQueryAsync(); } catch { }
+    }
+
+    await using (var cmd = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS pedidos_movil (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            sucursal_id INT NOT NULL,
+            mesa_id INT NOT NULL,
+            mesa VARCHAR(100) NOT NULL,
+            mesera_usuario VARCHAR(100) NOT NULL,
+            mesera_nombre VARCHAR(150) NOT NULL,
+            cajero_usuario VARCHAR(100) NULL,
+            fecha DATETIME NOT NULL,
+            fecha_respuesta DATETIME NULL,
+            estado VARCHAR(30) NOT NULL DEFAULT 'PENDIENTE',
+            total DECIMAL(10,2) NOT NULL DEFAULT 0,
+            observacion VARCHAR(250) NULL,
+            sync_key VARCHAR(180) NOT NULL,
+            UNIQUE KEY uk_pedidos_movil_sync (sync_key),
+            INDEX idx_pedidos_movil_sucursal_estado (sucursal_id, estado),
+            INDEX idx_pedidos_movil_mesera (mesera_usuario)
+        );
+    """, con))
+    {
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    await using (var cmd = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS detalle_pedidos_movil (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            pedido_id BIGINT NOT NULL,
+            producto_id BIGINT NOT NULL,
+            presentacion_id BIGINT NOT NULL,
+            producto VARCHAR(180) NOT NULL,
+            presentacion VARCHAR(120) NOT NULL,
+            cantidad DECIMAL(10,2) NOT NULL DEFAULT 0,
+            precio_unitario DECIMAL(10,2) NOT NULL DEFAULT 0,
+            subtotal DECIMAL(10,2) NOT NULL DEFAULT 0,
+            genera_comision TINYINT(1) NOT NULL DEFAULT 0,
+            tipo_comision VARCHAR(30) NOT NULL DEFAULT 'NINGUNA',
+            valor_comision DECIMAL(10,2) NOT NULL DEFAULT 0,
+            comision_calculada DECIMAL(10,2) NOT NULL DEFAULT 0,
+            INDEX idx_detalle_pedidos_movil_pedido (pedido_id)
+        );
+    """, con))
+    {
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    await using (var cmd = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS comisiones_meseras (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            pedido_id BIGINT NOT NULL,
+            sucursal_id INT NOT NULL,
+            mesa_id INT NOT NULL,
+            mesera_usuario VARCHAR(100) NOT NULL,
+            mesera_nombre VARCHAR(150) NOT NULL,
+            fecha DATETIME NOT NULL,
+            producto VARCHAR(180) NOT NULL,
+            cantidad DECIMAL(10,2) NOT NULL DEFAULT 0,
+            venta_total DECIMAL(10,2) NOT NULL DEFAULT 0,
+            comision_total DECIMAL(10,2) NOT NULL DEFAULT 0,
+            estado VARCHAR(30) NOT NULL DEFAULT 'PENDIENTE_PAGO',
+            UNIQUE KEY uk_comision_pedido (pedido_id, producto),
+            INDEX idx_comisiones_meseras_fecha (fecha),
+            INDEX idx_comisiones_meseras_mesera (mesera_usuario)
+        );
+    """, con))
+    {
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    await using (var seed = new MySqlCommand("""
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado)
+        SELECT 'ana_mesera', 'mesera123', 'MESERA', 1, 'ACTIVO'
+        WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'ana_mesera');
+
+        INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado)
+        SELECT 'rosa_mesera', 'mesera123', 'MESERA', 2, 'ACTIVO'
+        WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'rosa_mesera');
+    """, con))
+    {
+        try { await seed.ExecuteNonQueryAsync(); } catch { }
+    }
+}
 
 static async Task EnsureMesasEnVivoTables(MySqlConnection con)
 {
@@ -1383,4 +2222,29 @@ public record PropinaRequest(
     DateTime Fecha,
     decimal Monto,
     string? SyncKey
+);
+
+
+public sealed record AppPedidoMovilRequest(
+    int SucursalId,
+    int MesaId,
+    string Mesa,
+    string MeseraUsuario,
+    string MeseraNombre,
+    long ProductoId,
+    long PresentacionId,
+    string Producto,
+    string Presentacion,
+    decimal Cantidad,
+    decimal PrecioUnitario,
+    bool GeneraComision,
+    string TipoComision,
+    decimal ValorComision,
+    string? Observacion,
+    string? SyncKey
+);
+
+public sealed record PedidoEstadoRequest(
+    string Estado,
+    string? CajeroUsuario
 );

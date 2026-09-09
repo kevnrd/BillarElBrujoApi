@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V30_STOCK_TXT_SOLO_CANTIDADES",
+            version = "V32_STOCK_CORREGIDO",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -512,6 +512,221 @@ app.MapGet("/api/admin/productos/comision", async (Db db, string clave, int sucu
 });
 
 
+app.MapPost("/api/admin/productos/guardar", async (Db db, SheetsReporter sheets, string clave, AdminProductRequest req) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    int sucursalId = req.SucursalId == 2 ? 2 : 1;
+    string nombre = (req.Nombre ?? "").Trim();
+    if (string.IsNullOrWhiteSpace(nombre))
+        return Results.BadRequest(new { ok = false, message = "Nombre del producto requerido." });
+
+    string categoria = NormalizarCategoriaProducto(req.Categoria, nombre);
+    string unidadBase = string.IsNullOrWhiteSpace(req.UnidadBase) ? "UNIDAD" : req.UnidadBase.Trim();
+    string tipoEntrada = string.IsNullOrWhiteSpace(req.TipoEntrada) ? "PAQUETE" : req.TipoEntrada.Trim();
+    int unidadesPorEntrada = req.UnidadesPorEntrada <= 0 ? 1 : req.UnidadesPorEntrada;
+    decimal stockActual = Math.Max(0, req.StockActual);
+    decimal stockMinimo = Math.Max(0, req.StockMinimo);
+    decimal precioCompra = Math.Max(0, req.PrecioCompra);
+    string estado = string.Equals(req.Estado, "INACTIVO", StringComparison.OrdinalIgnoreCase) ? "INACTIVO" : "ACTIVO";
+    string tipoComision = req.GeneraComision ? (req.TipoComision ?? "PORCENTAJE").Trim().ToUpperInvariant() : "NINGUNA";
+    decimal valorComision = req.GeneraComision ? Math.Max(0, req.ValorComision) : 0;
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+    await using var tx = await con.BeginTransactionAsync();
+
+    try
+    {
+        long productoId = 0;
+
+        // Si la PC ya conoce el ID online, se usa primero. Esto permite renombrar
+        // un producto sin crear un duplicado en Railway.
+        if (req.ProductoId.GetValueOrDefault() > 0)
+        {
+            await using var buscarId = new MySqlCommand("SELECT id FROM productos WHERE id = @id AND sucursal_id = @sucursal_id LIMIT 1;", con, tx);
+            buscarId.Parameters.AddWithValue("@id", req.ProductoId!.Value);
+            buscarId.Parameters.AddWithValue("@sucursal_id", sucursalId);
+            object? foundId = await buscarId.ExecuteScalarAsync();
+            if (foundId != null) productoId = Convert.ToInt64(foundId);
+        }
+
+        if (productoId <= 0)
+        {
+            await using var buscar = new MySqlCommand("SELECT id FROM productos WHERE sucursal_id = @sucursal_id AND LOWER(TRIM(nombre)) = LOWER(TRIM(@nombre)) LIMIT 1;", con, tx);
+            buscar.Parameters.AddWithValue("@sucursal_id", sucursalId);
+            buscar.Parameters.AddWithValue("@nombre", nombre);
+            object? found = await buscar.ExecuteScalarAsync();
+            if (found != null) productoId = Convert.ToInt64(found);
+        }
+
+        if (productoId <= 0)
+        {
+            await using var cmd = new MySqlCommand("""
+                INSERT INTO productos
+                    (sucursal_id, nombre, categoria, unidad_base, stock_actual, stock_minimo, estado,
+                     genera_comision, tipo_comision, valor_comision, sin_limite_stock,
+                     tipo_entrada, unidades_por_entrada, precio_compra)
+                VALUES
+                    (@sucursal_id, @nombre, @categoria, @unidad_base, @stock_actual, @stock_minimo, @estado,
+                     @genera_comision, @tipo_comision, @valor_comision, @sin_limite_stock,
+                     @tipo_entrada, @unidades_por_entrada, @precio_compra);
+                SELECT LAST_INSERT_ID();
+            """, con, tx);
+            cmd.Parameters.AddWithValue("@sucursal_id", sucursalId);
+            cmd.Parameters.AddWithValue("@nombre", nombre);
+            cmd.Parameters.AddWithValue("@categoria", categoria);
+            cmd.Parameters.AddWithValue("@unidad_base", unidadBase);
+            cmd.Parameters.AddWithValue("@stock_actual", stockActual);
+            cmd.Parameters.AddWithValue("@stock_minimo", stockMinimo);
+            cmd.Parameters.AddWithValue("@estado", estado);
+            cmd.Parameters.AddWithValue("@genera_comision", req.GeneraComision ? 1 : 0);
+            cmd.Parameters.AddWithValue("@tipo_comision", tipoComision);
+            cmd.Parameters.AddWithValue("@valor_comision", valorComision);
+            cmd.Parameters.AddWithValue("@sin_limite_stock", req.SinLimiteStock ? 1 : 0);
+            cmd.Parameters.AddWithValue("@tipo_entrada", tipoEntrada);
+            cmd.Parameters.AddWithValue("@unidades_por_entrada", unidadesPorEntrada);
+            cmd.Parameters.AddWithValue("@precio_compra", precioCompra);
+            productoId = Convert.ToInt64(await cmd.ExecuteScalarAsync());
+        }
+        else
+        {
+            await using var cmd = new MySqlCommand("""
+                UPDATE productos
+                SET nombre = @nombre,
+                    categoria = @categoria,
+                    unidad_base = @unidad_base,
+                    stock_actual = @stock_actual,
+                    stock_minimo = @stock_minimo,
+                    estado = @estado,
+                    genera_comision = @genera_comision,
+                    tipo_comision = @tipo_comision,
+                    valor_comision = @valor_comision,
+                    sin_limite_stock = @sin_limite_stock,
+                    tipo_entrada = @tipo_entrada,
+                    unidades_por_entrada = @unidades_por_entrada,
+                    precio_compra = @precio_compra
+                WHERE id = @id;
+            """, con, tx);
+            cmd.Parameters.AddWithValue("@nombre", nombre);
+            cmd.Parameters.AddWithValue("@categoria", categoria);
+            cmd.Parameters.AddWithValue("@unidad_base", unidadBase);
+            cmd.Parameters.AddWithValue("@stock_actual", stockActual);
+            cmd.Parameters.AddWithValue("@stock_minimo", stockMinimo);
+            cmd.Parameters.AddWithValue("@estado", estado);
+            cmd.Parameters.AddWithValue("@genera_comision", req.GeneraComision ? 1 : 0);
+            cmd.Parameters.AddWithValue("@tipo_comision", tipoComision);
+            cmd.Parameters.AddWithValue("@valor_comision", valorComision);
+            cmd.Parameters.AddWithValue("@sin_limite_stock", req.SinLimiteStock ? 1 : 0);
+            cmd.Parameters.AddWithValue("@tipo_entrada", tipoEntrada);
+            cmd.Parameters.AddWithValue("@unidades_por_entrada", unidadesPorEntrada);
+            cmd.Parameters.AddWithValue("@precio_compra", precioCompra);
+            cmd.Parameters.AddWithValue("@id", productoId);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var presentacionesGuardadas = new List<object>();
+
+        foreach (var pres in req.Presentaciones ?? new List<AdminProductPresentationRequest>())
+        {
+            string presNombre = string.IsNullOrWhiteSpace(pres.Nombre) ? unidadBase : pres.Nombre.Trim();
+            int cantidadBase = pres.CantidadBase <= 0 ? 1 : pres.CantidadBase;
+            decimal precioVenta = Math.Max(0, pres.PrecioVenta);
+            string presEstado = string.Equals(pres.Estado, "INACTIVO", StringComparison.OrdinalIgnoreCase) ? "INACTIVO" : "ACTIVO";
+            long presId = 0;
+
+            if (pres.PresentacionId.GetValueOrDefault() > 0)
+            {
+                await using var buscarPresId = new MySqlCommand("SELECT id FROM presentaciones WHERE id = @id AND producto_id = @producto_id LIMIT 1;", con, tx);
+                buscarPresId.Parameters.AddWithValue("@id", pres.PresentacionId!.Value);
+                buscarPresId.Parameters.AddWithValue("@producto_id", productoId);
+                object? foundPresId = await buscarPresId.ExecuteScalarAsync();
+                if (foundPresId != null) presId = Convert.ToInt64(foundPresId);
+            }
+
+            if (presId <= 0)
+            {
+                await using var buscarPres = new MySqlCommand("SELECT id FROM presentaciones WHERE producto_id = @producto_id AND LOWER(TRIM(nombre)) = LOWER(TRIM(@nombre)) LIMIT 1;", con, tx);
+                buscarPres.Parameters.AddWithValue("@producto_id", productoId);
+                buscarPres.Parameters.AddWithValue("@nombre", presNombre);
+                object? foundPres = await buscarPres.ExecuteScalarAsync();
+                if (foundPres != null) presId = Convert.ToInt64(foundPres);
+            }
+
+            if (presId <= 0)
+            {
+                await using var cmd = new MySqlCommand("""
+                    INSERT INTO presentaciones (producto_id, nombre, cantidad_base, precio_venta, estado)
+                    VALUES (@producto_id, @nombre, @cantidad_base, @precio_venta, @estado);
+                """, con, tx);
+                cmd.Parameters.AddWithValue("@producto_id", productoId);
+                cmd.Parameters.AddWithValue("@nombre", presNombre);
+                cmd.Parameters.AddWithValue("@cantidad_base", cantidadBase);
+                cmd.Parameters.AddWithValue("@precio_venta", precioVenta);
+                cmd.Parameters.AddWithValue("@estado", presEstado);
+                await cmd.ExecuteNonQueryAsync();
+                presId = cmd.LastInsertedId;
+            }
+            else
+            {
+                await using var cmd = new MySqlCommand("""
+                    UPDATE presentaciones SET nombre = @nombre, cantidad_base = @cantidad_base, precio_venta = @precio_venta, estado = @estado WHERE id = @id;
+                """, con, tx);
+                cmd.Parameters.AddWithValue("@nombre", presNombre);
+                cmd.Parameters.AddWithValue("@cantidad_base", cantidadBase);
+                cmd.Parameters.AddWithValue("@precio_venta", precioVenta);
+                cmd.Parameters.AddWithValue("@estado", presEstado);
+                cmd.Parameters.AddWithValue("@id", presId);
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            presentacionesGuardadas.Add(new { id = presId, nombre = presNombre });
+        }
+
+        await tx.CommitAsync();
+        await TrySyncSheets(db, sheets);
+        return Results.Ok(new { ok = true, id = productoId, sucursalId, nombre, categoria, presentaciones = presentacionesGuardadas, message = "Producto guardado y sincronizado." });
+    }
+    catch (Exception ex)
+    {
+        await tx.RollbackAsync();
+        return Results.Problem("No se pudo guardar el producto: " + ex.Message);
+    }
+});
+
+app.MapGet("/api/admin/productos/detalle", async (Db db, string clave, int sucursalId) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    const string sql = """
+        SELECT p.id AS producto_id, p.sucursal_id, p.nombre, p.categoria, p.unidad_base,
+               p.stock_actual, p.stock_minimo, COALESCE(p.sin_limite_stock,0) AS sin_limite_stock,
+               COALESCE(p.tipo_entrada,'PAQUETE') AS tipo_entrada,
+               COALESCE(p.unidades_por_entrada,1) AS unidades_por_entrada,
+               COALESCE(p.precio_compra,0) AS precio_compra,
+               COALESCE(p.genera_comision,0) AS genera_comision,
+               COALESCE(p.tipo_comision,'NINGUNA') AS tipo_comision,
+               COALESCE(p.valor_comision,0) AS valor_comision,
+               p.estado,
+               pr.id AS presentacion_id, pr.nombre AS presentacion,
+               pr.cantidad_base, pr.precio_venta, pr.estado AS presentacion_estado
+        FROM productos p
+        LEFT JOIN presentaciones pr ON pr.producto_id = p.id
+        WHERE p.sucursal_id = @sucursal_id
+        ORDER BY p.categoria, p.nombre, pr.cantidad_base;
+    """;
+
+    return Results.Ok(await db.QueryAsync(con, sql, new Dictionary<string, object?>
+    {
+        ["@sucursal_id"] = sucursalId == 2 ? 2 : 1
+    }));
+});
+
 app.MapPost("/api/app-mesera/login", async (Db db, LoginRequest req) =>
 {
     await using var con = await db.OpenAsync();
@@ -638,7 +853,7 @@ app.MapGet("/api/app-mesera/productos", async (Db db, int sucursalId) =>
                 WHEN p.categoria = 'Agua' THEN 1
                 WHEN p.categoria = 'Energizantes' THEN 2
                 WHEN p.categoria = 'Sodas' THEN 3
-                WHEN p.categoria = 'Coca machucada' THEN 4
+                WHEN p.categoria IN ('Cocas', 'Coca machucada') THEN 4
                 WHEN p.categoria = 'Cervezas' THEN 5
                 WHEN p.categoria = 'Tragos / Botellas' THEN 6
                 WHEN p.categoria = 'Servidos en vaso' THEN 7
@@ -646,7 +861,9 @@ app.MapGet("/api/app-mesera/productos", async (Db db, int sucursalId) =>
                 WHEN p.categoria = 'Snacks y piqueos' THEN 9
                 WHEN p.categoria = 'Dulces y golosinas' THEN 10
                 WHEN p.categoria = 'Combos / Promos' THEN 11
-                WHEN p.categoria = 'Otros / Extras' THEN 12
+                WHEN p.categoria = 'Accesorios' THEN 12
+                WHEN p.categoria = 'Ceniceros' THEN 13
+                WHEN p.categoria IN ('Otros', 'Otros / Extras', 'Varios') THEN 14
                 ELSE 99
             END,
             p.nombre, pr.nombre;
@@ -674,7 +891,7 @@ app.MapGet("/api/app-mesera/test", async (Db db, int sucursalId) =>
     return Results.Ok(new
     {
         ok = true,
-        version = "V20_FIX_APP_PRODUCTOS_MESAS",
+        version = "V32_STOCK_CORREGIDO",
         sucursalId,
         productos,
         presentaciones,
@@ -979,6 +1196,7 @@ app.MapGet("/api/mesas", async (Db db, int? sucursalId) =>
 app.MapGet("/api/productos", async (Db db, int? sucursalId) =>
 {
     await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
 
     const string sql = """
         SELECT p.id, p.sucursal_id, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, p.nombre, p.categoria,
@@ -991,7 +1209,7 @@ app.MapGet("/api/productos", async (Db db, int? sucursalId) =>
                     WHEN p.categoria = 'Agua' THEN 1
                     WHEN p.categoria = 'Energizantes' THEN 2
                     WHEN p.categoria = 'Sodas' THEN 3
-                    WHEN p.categoria = 'Coca machucada' THEN 4
+                    WHEN p.categoria IN ('Cocas', 'Coca machucada') THEN 4
                     WHEN p.categoria = 'Cervezas' THEN 5
                     WHEN p.categoria = 'Tragos / Botellas' THEN 6
                     WHEN p.categoria = 'Servidos en vaso' THEN 7
@@ -999,7 +1217,9 @@ app.MapGet("/api/productos", async (Db db, int? sucursalId) =>
                     WHEN p.categoria = 'Snacks y piqueos' THEN 9
                     WHEN p.categoria = 'Dulces y golosinas' THEN 10
                     WHEN p.categoria = 'Combos / Promos' THEN 11
-                    WHEN p.categoria = 'Otros / Extras' THEN 12
+                    WHEN p.categoria = 'Accesorios' THEN 12
+                    WHEN p.categoria = 'Ceniceros' THEN 13
+                    WHEN p.categoria IN ('Otros', 'Otros / Extras', 'Varios') THEN 14
                     ELSE 99
                  END,
                  p.nombre;
@@ -1159,6 +1379,17 @@ app.MapGet("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter shee
 
 
 
+app.MapPost("/api/admin/aplicar-stock-inicial", async (Db db, SheetsReporter sheets, string clave, int sucursalId = 1) =>
+{
+    return await AplicarStockInicialReferenciaV32(db, sheets, clave, sucursalId);
+});
+
+app.MapGet("/api/admin/aplicar-stock-inicial", async (Db db, SheetsReporter sheets, string clave, int sucursalId = 1) =>
+{
+    return await AplicarStockInicialReferenciaV32(db, sheets, clave, sucursalId);
+});
+
+
 app.MapPost("/api/admin/aplicar-stock-txt", async (Db db, SheetsReporter sheets, string clave, int sucursalId = 1) =>
 {
     const string cleanKey = "ENTREGAR_LIMPIO_2026";
@@ -1219,7 +1450,7 @@ app.MapPost("/api/admin/aplicar-stock-txt", async (Db db, SheetsReporter sheets,
     return Results.Ok(new
     {
         ok = true,
-        version = "V30_STOCK_TXT_SOLO_CANTIDADES",
+        version = "V32_STOCK_CORREGIDO",
         message = "Stock actualizado únicamente con las cantidades del TXT. No se modificaron precios, categorías ni presentaciones.",
         criterio = "Las cantidades se copiaron tal cual están en el TXT y se interpretan como cantidad de paquetes.",
         sucursalId,
@@ -1288,7 +1519,7 @@ app.MapGet("/api/admin/aplicar-stock-txt", async (Db db, SheetsReporter sheets, 
     return Results.Ok(new
     {
         ok = true,
-        version = "V30_STOCK_TXT_SOLO_CANTIDADES",
+        version = "V32_STOCK_CORREGIDO",
         message = "Stock actualizado únicamente con las cantidades del TXT. No se modificaron precios, categorías ni presentaciones.",
         criterio = "Las cantidades se copiaron tal cual están en el TXT y se interpretan como cantidad de paquetes.",
         sucursalId,
@@ -1297,29 +1528,66 @@ app.MapGet("/api/admin/aplicar-stock-txt", async (Db db, SheetsReporter sheets, 
     });
 });
 
-app.MapPost("/api/productos", async (Db db, SheetsReporter sheets, ProductoRequest p) =>
+app.MapPost("/api/productos", async (Db db, SheetsReporter sheets, string clave, ProductoRequest p) =>
 {
+    // Endpoint legado protegido: el alta normal de productos se realiza desde
+    // /api/admin/productos/guardar, que conserva toda la estructura del producto.
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+    if (p.SucursalId != 1 && p.SucursalId != 2)
+        return Results.BadRequest(new { ok = false, message = "Sucursal inválida." });
+    if (string.IsNullOrWhiteSpace(p.Nombre))
+        return Results.BadRequest(new { ok = false, message = "El nombre del producto es obligatorio." });
+
     await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
 
-    const string sql = """
-        INSERT INTO productos (sucursal_id, nombre, categoria, unidad_base, stock_actual, stock_minimo, estado)
-        VALUES (@sucursal_id, @nombre, @categoria, @unidad_base, @stock_actual, @stock_minimo, 'ACTIVO');
-        SELECT LAST_INSERT_ID();
-    """;
+    string nombre = p.Nombre.Trim();
+    string categoria = NormalizarCategoriaProducto(p.Categoria, nombre);
+    string unidadBase = string.IsNullOrWhiteSpace(p.UnidadBase) ? "UNIDAD" : p.UnidadBase.Trim().ToUpperInvariant();
+    long id = 0;
 
-    await using var cmd = new MySqlCommand(sql, con);
-    cmd.Parameters.AddWithValue("@sucursal_id", p.SucursalId);
-    cmd.Parameters.AddWithValue("@nombre", p.Nombre);
-    cmd.Parameters.AddWithValue("@categoria", p.Categoria);
-    cmd.Parameters.AddWithValue("@unidad_base", p.UnidadBase);
-    cmd.Parameters.AddWithValue("@stock_actual", p.StockActual);
-    cmd.Parameters.AddWithValue("@stock_minimo", p.StockMinimo);
+    await using (var buscar = new MySqlCommand("SELECT id FROM productos WHERE sucursal_id=@sucursal_id AND LOWER(TRIM(nombre))=LOWER(TRIM(@nombre)) LIMIT 1;", con))
+    {
+        buscar.Parameters.AddWithValue("@sucursal_id", p.SucursalId);
+        buscar.Parameters.AddWithValue("@nombre", nombre);
+        object? found = await buscar.ExecuteScalarAsync();
+        if (found != null) id = Convert.ToInt64(found);
+    }
 
-    var id = Convert.ToInt64(await cmd.ExecuteScalarAsync());
+    if (id <= 0)
+    {
+        await using var cmd = new MySqlCommand("""
+            INSERT INTO productos (sucursal_id, nombre, categoria, unidad_base, stock_actual, stock_minimo, estado)
+            VALUES (@sucursal_id, @nombre, @categoria, @unidad_base, @stock_actual, @stock_minimo, 'ACTIVO');
+            SELECT LAST_INSERT_ID();
+        """, con);
+        cmd.Parameters.AddWithValue("@sucursal_id", p.SucursalId);
+        cmd.Parameters.AddWithValue("@nombre", nombre);
+        cmd.Parameters.AddWithValue("@categoria", categoria);
+        cmd.Parameters.AddWithValue("@unidad_base", unidadBase);
+        cmd.Parameters.AddWithValue("@stock_actual", Math.Max(0, p.StockActual));
+        cmd.Parameters.AddWithValue("@stock_minimo", Math.Max(0, p.StockMinimo));
+        id = Convert.ToInt64(await cmd.ExecuteScalarAsync());
+    }
+    else
+    {
+        await using var cmd = new MySqlCommand("""
+            UPDATE productos
+            SET categoria=@categoria, unidad_base=@unidad_base,
+                stock_actual=@stock_actual, stock_minimo=@stock_minimo, estado='ACTIVO'
+            WHERE id=@id;
+        """, con);
+        cmd.Parameters.AddWithValue("@categoria", categoria);
+        cmd.Parameters.AddWithValue("@unidad_base", unidadBase);
+        cmd.Parameters.AddWithValue("@stock_actual", Math.Max(0, p.StockActual));
+        cmd.Parameters.AddWithValue("@stock_minimo", Math.Max(0, p.StockMinimo));
+        cmd.Parameters.AddWithValue("@id", id);
+        await cmd.ExecuteNonQueryAsync();
+    }
 
     await TrySyncSheets(db, sheets);
-
-    return Results.Ok(new { ok = true, id });
+    return Results.Ok(new { ok = true, id, categoria });
 });
 
 app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest venta) =>
@@ -1333,6 +1601,13 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
         string syncKey = string.IsNullOrWhiteSpace(venta.SyncKey)
             ? Guid.NewGuid().ToString("N")
             : venta.SyncKey;
+
+        bool ventaYaExistia;
+        await using (var existeCmd = new MySqlCommand("SELECT COUNT(*) FROM ventas WHERE sync_key = @sync_key;", con, tx))
+        {
+            existeCmd.Parameters.AddWithValue("@sync_key", syncKey);
+            ventaYaExistia = Convert.ToInt32(await existeCmd.ExecuteScalarAsync() ?? 0) > 0;
+        }
 
         const string ventaSql = """
             INSERT INTO ventas (sucursal_id, cajero, fecha, tipo, metodo_pago, total, sync_key)
@@ -1362,44 +1637,92 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 
         foreach (var d in venta.Detalle)
         {
-            long productoId = d.ProductoId <= 0 ? Math.Abs((d.Producto ?? "PRODUCTO").GetHashCode()) : d.ProductoId;
-            long presentacionId = d.PresentacionId <= 0 ? Math.Abs(((d.Producto ?? "") + "-" + (d.Presentacion ?? "")).GetHashCode()) : d.PresentacionId;
+            string nombreProducto = string.IsNullOrWhiteSpace(d.Producto) ? "Producto" : d.Producto.Trim();
+            string nombrePresentacion = string.IsNullOrWhiteSpace(d.Presentacion) ? "Unidad" : d.Presentacion.Trim();
+            decimal cantidadBase = d.CantidadBase <= 0 ? d.Cantidad : d.CantidadBase;
 
-            // Garantiza que el producto exista en Railway antes de insertar el detalle.
-            // Esto evita fallas por llaves foráneas cuando la PC local tiene productos
-            // pero MySQL Railway fue limpiado para la entrega.
-            await using (var prodCmd = new MySqlCommand("""
-                INSERT INTO productos (id, sucursal_id, nombre, categoria, unidad_base, stock_actual, stock_minimo, estado)
-                VALUES (@id, @sucursal_id, @nombre, 'General', 'UNIDAD', 0, 0, 'ACTIVO')
-                ON DUPLICATE KEY UPDATE
-                    nombre = VALUES(nombre),
-                    sucursal_id = VALUES(sucursal_id),
-                    estado = 'ACTIVO';
+            // Los ID de SQLite/JSON de la PC no se reutilizan como ID de MySQL.
+            // Railway resuelve producto por sucursal + nombre y presentación por producto + nombre.
+            // Así no se crean duplicados ni se pisa otro producto cuando los ID locales difieren.
+            long productoId;
+            await using (var findProd = new MySqlCommand("""
+                SELECT id
+                FROM productos
+                WHERE sucursal_id = @sucursal_id
+                  AND LOWER(TRIM(nombre)) = LOWER(TRIM(@nombre))
+                ORDER BY id
+                LIMIT 1;
             """, con, tx))
             {
-                prodCmd.Parameters.AddWithValue("@id", productoId);
-                prodCmd.Parameters.AddWithValue("@sucursal_id", venta.SucursalId);
-                prodCmd.Parameters.AddWithValue("@nombre", string.IsNullOrWhiteSpace(d.Producto) ? "Producto" : d.Producto);
-                await prodCmd.ExecuteNonQueryAsync();
+                findProd.Parameters.AddWithValue("@sucursal_id", venta.SucursalId);
+                findProd.Parameters.AddWithValue("@nombre", nombreProducto);
+                var found = await findProd.ExecuteScalarAsync();
+                if (found != null)
+                {
+                    productoId = Convert.ToInt64(found);
+                    await using var activar = new MySqlCommand("UPDATE productos SET estado = 'ACTIVO' WHERE id = @id;", con, tx);
+                    activar.Parameters.AddWithValue("@id", productoId);
+                    await activar.ExecuteNonQueryAsync();
+                }
+                else
+                {
+                    string categoriaNueva = NormalizarCategoriaProducto(null, nombreProducto);
+                    await using var insertProd = new MySqlCommand("""
+                        INSERT INTO productos
+                        (sucursal_id, nombre, categoria, tipo_entrada, unidad_base, unidades_por_entrada,
+                         precio_compra, stock_actual, stock_minimo, estado)
+                        VALUES
+                        (@sucursal_id, @nombre, @categoria, 'UNIDAD', 'UNIDAD', 1, 0, 0, 0, 'ACTIVO');
+                        SELECT LAST_INSERT_ID();
+                    """, con, tx);
+                    insertProd.Parameters.AddWithValue("@sucursal_id", venta.SucursalId);
+                    insertProd.Parameters.AddWithValue("@nombre", nombreProducto);
+                    insertProd.Parameters.AddWithValue("@categoria", categoriaNueva);
+                    productoId = Convert.ToInt64(await insertProd.ExecuteScalarAsync());
+                }
             }
 
-            await using (var presCmd = new MySqlCommand("""
-                INSERT INTO presentaciones (id, producto_id, nombre, cantidad_base, precio_venta, estado)
-                VALUES (@id, @producto_id, @nombre, @cantidad_base, @precio_venta, 'ACTIVO')
-                ON DUPLICATE KEY UPDATE
-                    producto_id = VALUES(producto_id),
-                    nombre = VALUES(nombre),
-                    cantidad_base = VALUES(cantidad_base),
-                    precio_venta = VALUES(precio_venta),
-                    estado = 'ACTIVO';
+            long presentacionId;
+            await using (var findPres = new MySqlCommand("""
+                SELECT id
+                FROM presentaciones
+                WHERE producto_id = @producto_id
+                  AND LOWER(TRIM(nombre)) = LOWER(TRIM(@nombre))
+                ORDER BY id
+                LIMIT 1;
             """, con, tx))
             {
-                presCmd.Parameters.AddWithValue("@id", presentacionId);
-                presCmd.Parameters.AddWithValue("@producto_id", productoId);
-                presCmd.Parameters.AddWithValue("@nombre", string.IsNullOrWhiteSpace(d.Presentacion) ? "Unidad" : d.Presentacion);
-                presCmd.Parameters.AddWithValue("@cantidad_base", d.CantidadBase <= 0 ? d.Cantidad : d.CantidadBase);
-                presCmd.Parameters.AddWithValue("@precio_venta", d.PrecioUnitario);
-                await presCmd.ExecuteNonQueryAsync();
+                findPres.Parameters.AddWithValue("@producto_id", productoId);
+                findPres.Parameters.AddWithValue("@nombre", nombrePresentacion);
+                var found = await findPres.ExecuteScalarAsync();
+                if (found != null)
+                {
+                    presentacionId = Convert.ToInt64(found);
+                    await using var updatePres = new MySqlCommand("""
+                        UPDATE presentaciones
+                        SET cantidad_base = @cantidad_base,
+                            precio_venta = @precio_venta,
+                            estado = 'ACTIVO'
+                        WHERE id = @id;
+                    """, con, tx);
+                    updatePres.Parameters.AddWithValue("@cantidad_base", cantidadBase);
+                    updatePres.Parameters.AddWithValue("@precio_venta", d.PrecioUnitario);
+                    updatePres.Parameters.AddWithValue("@id", presentacionId);
+                    await updatePres.ExecuteNonQueryAsync();
+                }
+                else
+                {
+                    await using var insertPres = new MySqlCommand("""
+                        INSERT INTO presentaciones (producto_id, nombre, cantidad_base, precio_venta, estado)
+                        VALUES (@producto_id, @nombre, @cantidad_base, @precio_venta, 'ACTIVO');
+                        SELECT LAST_INSERT_ID();
+                    """, con, tx);
+                    insertPres.Parameters.AddWithValue("@producto_id", productoId);
+                    insertPres.Parameters.AddWithValue("@nombre", nombrePresentacion);
+                    insertPres.Parameters.AddWithValue("@cantidad_base", cantidadBase);
+                    insertPres.Parameters.AddWithValue("@precio_venta", d.PrecioUnitario);
+                    presentacionId = Convert.ToInt64(await insertPres.ExecuteScalarAsync());
+                }
             }
 
             const string detalleSql = """
@@ -1420,18 +1743,23 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
             detCmd.Parameters.AddWithValue("@subtotal", d.Subtotal);
             await detCmd.ExecuteNonQueryAsync();
 
-            await using var stockCmd = new MySqlCommand("""
-                UPDATE productos
-                SET stock_actual = CASE
-                    WHEN COALESCE(sin_limite_stock, 0) = 1 OR categoria = 'Servidos en vaso'
-                    THEN stock_actual
-                    ELSE GREATEST(stock_actual - @cantidad_base, 0)
-                END
-                WHERE id = @producto_id;
-            """, con, tx);
-            stockCmd.Parameters.AddWithValue("@cantidad_base", d.CantidadBase <= 0 ? d.Cantidad : d.CantidadBase);
-            stockCmd.Parameters.AddWithValue("@producto_id", productoId);
-            await stockCmd.ExecuteNonQueryAsync();
+            // Una misma venta se reenvía durante la sincronización automática. El stock solo
+            // debe descontarse la primera vez que llega ese sync_key.
+            if (!ventaYaExistia)
+            {
+                await using var stockCmd = new MySqlCommand("""
+                    UPDATE productos
+                    SET stock_actual = CASE
+                        WHEN COALESCE(sin_limite_stock, 0) = 1 OR categoria = 'Servidos en vaso'
+                        THEN stock_actual
+                        ELSE GREATEST(stock_actual - @cantidad_base, 0)
+                    END
+                    WHERE id = @producto_id;
+                """, con, tx);
+                stockCmd.Parameters.AddWithValue("@cantidad_base", cantidadBase);
+                stockCmd.Parameters.AddWithValue("@producto_id", productoId);
+                await stockCmd.ExecuteNonQueryAsync();
+            }
         }
 
         await tx.CommitAsync();
@@ -1849,6 +2177,184 @@ static async Task TrySyncSheets(Db db, SheetsReporter sheets)
 }
 
 
+static async Task<IResult> AplicarStockInicialReferenciaV32(Db db, SheetsReporter sheets, string clave, int sucursalId)
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+    if (sucursalId != 1 && sucursalId != 2)
+        return Results.BadRequest(new { ok = false, message = "sucursalId debe ser 1 o 2." });
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    int productosActualizados = 0;
+    var faltantes = new List<string>();
+
+    foreach (var item in StockInicialReferenciaV32())
+    {
+        long productoId = 0;
+
+        foreach (string alias in item.aliases)
+        {
+            await using var buscar = new MySqlCommand("""
+                SELECT id
+                FROM productos
+                WHERE sucursal_id = @sucursal_id
+                  AND UPPER(TRIM(nombre)) = UPPER(TRIM(@nombre))
+                  AND estado = 'ACTIVO'
+                LIMIT 1;
+            """, con);
+            buscar.Parameters.AddWithValue("@sucursal_id", sucursalId);
+            buscar.Parameters.AddWithValue("@nombre", alias);
+
+            object? found = await buscar.ExecuteScalarAsync();
+            if (found != null)
+            {
+                productoId = Convert.ToInt64(found);
+                break;
+            }
+        }
+
+        if (productoId <= 0)
+        {
+            faltantes.Add(item.aliases[0]);
+            continue;
+        }
+
+        await using var actualizar = new MySqlCommand("""
+            UPDATE productos
+            SET stock_actual = @stock_actual
+            WHERE id = @id;
+        """, con);
+        actualizar.Parameters.AddWithValue("@stock_actual", item.cantidad);
+        actualizar.Parameters.AddWithValue("@id", productoId);
+        await actualizar.ExecuteNonQueryAsync();
+        productosActualizados++;
+    }
+
+    await TrySyncSheets(db, sheets);
+
+    return Results.Ok(new
+    {
+        ok = true,
+        version = "V32_STOCK_CORREGIDO",
+        message = "Stock inicial cargado con las cantidades visibles en las capturas del inventario.",
+        sucursalId,
+        productosActualizados,
+        faltantes,
+        nota = "Solo se modifica stock_actual. No se cambian precios, categorías, presentaciones ni comisiones."
+    });
+}
+
+static (decimal cantidad, string[] aliases)[] StockInicialReferenciaV32() => new (decimal cantidad, string[] aliases)[]
+{
+                (2m, new[] { "RON ABUELO", "ABUELO" }),
+                (13m, new[] { "AGUA 2 LITROS", "AGUA 2L" }),
+                (12m, new[] { "AGUA PERSONAL CON GAS", "AGUA CON GAS" }),
+                (17m, new[] { "AGUA PERSONAL SIN GAS", "AGUA SIN GAS" }),
+                (11m, new[] { "AGUA TONICA" }),
+                (5m, new[] { "ALIKAL" }),
+                (0m, new[] { "BELDEN" }),
+                (44m, new[] { "BICO SABORES" }),
+                (13m, new[] { "BLACK" }),
+                (22m, new[] { "CERVEZA AMSTEL" }),
+                (0m, new[] { "CERVEZA CONTI" }),
+                (49m, new[] { "CERVEZA CORONA" }),
+                (152m, new[] { "CERVEZA PACEÑA" }),
+                (48m, new[] { "CERVEZA SKUL", "CERVEZA SKOL" }),
+                (18m, new[] { "CICLON" }),
+                (10m, new[] { "CIGARRO BOHEM DOUBLE GRANDE" }),
+                (18m, new[] { "CIGARRO BOHEM UND" }),
+                (0m, new[] { "CIGARRO BOHEN BLACK" }),
+                (0m, new[] { "CIGARRO BOHEN SANDIA" }),
+                (20m, new[] { "CIGARRO BOHEN UNIDAD" }),
+                (5m, new[] { "CIGARRO BOHEN YOGOURT" }),
+                (31m, new[] { "CIGARRO CAMEL ACTIVA UNID" }),
+                (1m, new[] { "CIGARRO CAMEL ATIVO CHICO" }),
+                (9m, new[] { "CIGARRO CAMEL GRANDE ACTIVA" }),
+                (27m, new[] { "CIGARRO CAMEL SANDI UNIDAD" }),
+                (11m, new[] { "CIGARRO CAMEL SANDIA CHICO" }),
+                (11m, new[] { "CIGARRO CAMEL SANDIA GRANDE" }),
+                (6m, new[] { "CIGARRO HILLS SANDI" }),
+                (0m, new[] { "CIGARRO HILS" }),
+                (16m, new[] { "CINCERO", "CENICERO" }),
+                (89m, new[] { "CLORETS" }),
+                (0m, new[] { "COCA EL BRUJO BICO STEVIA" }),
+                (0m, new[] { "COCA EL BRUJO CHICLE", "COCA EL BRUJO CHILE" }),
+                (3m, new[] { "COCA EL BRUJO MARACUYA" }),
+                (3m, new[] { "COCA EL BRUJO MEDUSA" }),
+                (2m, new[] { "COCA EL BRUJO RED BULL" }),
+                (8m, new[] { "COCA EL BRUJO SANDIA RED BULL" }),
+                (13m, new[] { "COCA EL BRUJO YOGOURT RED BULL" }),
+                (0m, new[] { "COCA EL BRUJO YOGUBOLL" }),
+                (6m, new[] { "COMBO FERNET" }),
+                (10m, new[] { "COMBO FLOR DE CAÑA" }),
+                (10m, new[] { "COMBO GIN" }),
+                (10m, new[] { "COMBO HABANA" }),
+                (15m, new[] { "COPAS DE VINO" }),
+                (4m, new[] { "DOCILE MINTY" }),
+                (5m, new[] { "ENCENDEDOR" }),
+                (3m, new[] { "FERNET" }),
+                (4m, new[] { "FLOW ACHACHAIRU" }),
+                (0m, new[] { "FLOW CHUFLAY" }),
+                (11m, new[] { "FLOW SIN AZUCAR" }),
+                (19m, new[] { "FOUR LOCO" }),
+                (2m, new[] { "GIN ROSADO" }),
+                (63m, new[] { "GROSSO" }),
+                (13m, new[] { "HALLS" }),
+                (24m, new[] { "ICE 51" }),
+                (8m, new[] { "NACHO NORMAL" }),
+                (9m, new[] { "NACHOS PICANTES" }),
+                (8m, new[] { "NOCHE ICE" }),
+                (12m, new[] { "NACHO MAX QUESO" }),
+                (10m, new[] { "PAPAS NORMALES" }),
+                (0m, new[] { "PAPAS PICANTES" }),
+                (28m, new[] { "PASTILLAS EUCALIPTO" }),
+                (12m, new[] { "PASTILLAS MINT" }),
+                (12m, new[] { "POWER CHICO" }),
+                (6m, new[] { "POWER GRANDE" }),
+                (20m, new[] { "PROMO AMSTEL" }),
+                (30m, new[] { "PROMO AMSTEL X 3" }),
+                (20m, new[] { "PROMO CONTI" }),
+                (30m, new[] { "PROMO CONTI X 3" }),
+                (20m, new[] { "PROMO CORONA" }),
+                (50m, new[] { "PROMO PACEÑA" }),
+                (17m, new[] { "PROMO VASO DE FERNET" }),
+                (6m, new[] { "PAPA NAX" }),
+                (8m, new[] { "PIZONES CHOCOLATE" }),
+                (10m, new[] { "PIZONES PICANTES" }),
+                (2m, new[] { "PLATANITO CHIPS" }),
+                (1m, new[] { "QUISQUE BLACK LABEL", "WHIKY BLACK LABEL" }),
+                (23m, new[] { "RED BULL" }),
+                (1m, new[] { "RON DE COCO OLD" }),
+                (6m, new[] { "RON FLOR DE CAÑA" }),
+                (3m, new[] { "RON HABANA 7 AÑOS" }),
+                (7m, new[] { "SANTE GRANDE" }),
+                (7m, new[] { "SANTE PEQUEÑO" }),
+                (10m, new[] { "SODA COCA COLA 2 LITROS" }),
+                (7m, new[] { "SODA COCA COLA 3 LITROS" }),
+                (13m, new[] { "SODA FANTA 2 LITROS" }),
+                (13m, new[] { "SODA PEQUE COCA COLA VARIOS" }),
+                (10m, new[] { "SODA SPRITE 2 LITROS" }),
+                (7m, new[] { "TAKIS" }),
+                (2m, new[] { "TEQUILA JOSE CUERVO" }),
+                (51m, new[] { "VASO DE FERNET + COCA COLA 2L E 3L" }),
+                (10m, new[] { "VASO DE RON" }),
+                (10m, new[] { "VASO DE WISKIE", "VASO DE WHISKY" }),
+                (4m, new[] { "VASO TEQUILERO" }),
+                (37m, new[] { "VASOS CERVECEROS" }),
+                (20m, new[] { "VASOS DE SODA" }),
+                (4m, new[] { "VINO BLANCO" }),
+                (17m, new[] { "VINO TINTO" }),
+                (64m, new[] { "CHICLE" }),
+                (15m, new[] { "CHICLE GRANDE" }),
+                (30m, new[] { "CHICLE PEQUEÑO" }),
+                (1m, new[] { "CHUPETE" }),
+                (0m, new[] { "MABEL" }),
+                (4m, new[] { "MIX NAX" }),
+};
+
+
 static (decimal cantidad, string[] aliases)[] StockSoloTxtV30() => new (decimal cantidad, string[] aliases)[]
 {
     (9m, new[] { "AGUA 2 LITROS", "AGUA 2L" }),
@@ -2167,6 +2673,7 @@ static (string nombre, string categoria, decimal precio, string detalle)[] Catal
 
 static async Task<bool> UpsertCatalogoFinalV29(MySqlConnection con, int sucursalId, string nombre, string categoria, decimal cantidad, decimal precio, bool sinLimiteStock)
 {
+    categoria = NormalizarCategoriaProducto(categoria, nombre);
     long productoId = 0;
 
     await using (var buscar = new MySqlCommand("SELECT id FROM productos WHERE sucursal_id = @sucursal_id AND nombre = @nombre LIMIT 1;", con))
@@ -2262,6 +2769,7 @@ static async Task<bool> UpsertCatalogoFinalV29(MySqlConnection con, int sucursal
 
 static async Task<bool> UpsertCatalogoProductoLocal(MySqlConnection con, int sucursalId, string nombre, string categoria, decimal precio, string presentacion, int minimo)
 {
+    categoria = NormalizarCategoriaProducto(categoria, nombre);
     long productoId = 0;
 
     await using (var buscar = new MySqlCommand("SELECT id FROM productos WHERE sucursal_id = @sucursal_id AND nombre = @nombre LIMIT 1;", con))
@@ -2461,6 +2969,27 @@ static string NormalizarTurno(string? turno)
     return "MAÑANA";
 }
 
+static string NormalizarCategoriaProducto(string? categoria, string? nombre)
+{
+    string c = (categoria ?? "").Trim().ToUpperInvariant();
+    string n = (nombre ?? "").Trim().ToUpperInvariant();
+
+    if (c.Contains("CENICER") || c.Contains("CINCER") || n.Contains("CENICER") || n.Contains("CINCERO")) return "Ceniceros";
+    if (c.Contains("ACCESORIO") || n == "ENCENDEDOR" || n == "COPAS DE VINO" || n == "VASO TEQUILERO" || n == "VASOS CERVECEROS" || n == "VASOS DE SODA" || n == "VASOS DE WISKI" || n == "VASOS DE WHISKY" || n == "VASO DE WISKI" || n == "VASO DE WISKIE" || n == "VASO DE WHISKY") return "Accesorios";
+    if (c.Contains("SERVIDOS EN VASO") || c.Contains("LO QUE SE SIRVE EN VASO") || (n.StartsWith("VASO ") && n != "VASO TEQUILERO")) return "Servidos en vaso";
+    if (c == "COCAS" || c.Contains("COCA MACHUCADA") || n.StartsWith("COCA EL BRUJO") || n.StartsWith("COCA AMAIRE") || n.StartsWith("COCA BICO") || n.StartsWith("COCA MARACUYA") || n.StartsWith("COCA MEDUSA") || n.StartsWith("COCA RED") || n.StartsWith("COCA SANDIA") || n.StartsWith("COCA YOG")) return "Cocas";
+    if (c.Contains("COMBO") || c.Contains("PROMO") || n.Contains("COMBO") || n.StartsWith("PROMO ")) return "Combos / Promos";
+    if (c == "AGUA" || n.Contains("AGUA") || n.StartsWith("SANTE ")) return "Agua";
+    if (c.Contains("ENERGIZANTE") || n.Contains("RED BULL") || n.Contains("CICLON") || n.Contains("POWER") || n == "BLACK") return "Energizantes";
+    if (c.Contains("SODA") || n.StartsWith("SODA ") || n.Contains("SPRITE") || n.Contains("FANTA")) return "Sodas";
+    if (c.Contains("CERVEZA") || c == "CERVEZAS" || n.StartsWith("CERVEZA ") || n.Contains("PACEÑA") || n.Contains("CONTI") || n.Contains("CORONA") || n.Contains("SKOL") || n.Contains("SKUL") || n.Contains("AMSTEL")) return "Cervezas";
+    if (c.Contains("CIGARRO") || n.Contains("CIGARRO") || n.Contains("CAMEL") || n.Contains("BOHEM") || n.Contains("BOHEN") || n.Contains("HILLS")) return "Cigarros";
+    if (c.Contains("SNACK") || c.Contains("PIQUEO") || n.Contains("NACHO") || n.Contains("PAPA") || n.Contains("PIZON") || n.Contains("PINZON") || n.Contains("PLATANITO") || n.Contains("TAKIS") || n.Contains("MIX NAX")) return "Snacks y piqueos";
+    if (c.Contains("DULCE") || c.Contains("GOLOSINA") || n.Contains("CHICLE") || n.Contains("CLORETS") || n.Contains("BELDEN") || n.Contains("ARCOR") || n.Contains("HALLS") || n.Contains("MABEL") || n.Contains("GROSO") || n.Contains("MINT") || n.Contains("CHUPETE") || n.Contains("EUCALIPTO") || n.Contains("BICO SABORES")) return "Dulces y golosinas";
+    if (c.Contains("TRAGO") || c.Contains("BOTELLA") || n.Contains("RON") || n.Contains("FERNET") || n.Contains("GIN") || n.Contains("TEQUILA") || n.Contains("WHIKY") || n.Contains("WHISK") || n.Contains("WISK") || n.Contains("VINO") || n.Contains("AMARULA") || n.Contains("FLOR DE CAÑA") || n.Contains("FOUR LOCO") || n.Contains("FLOW") || n.Contains("HAVANA") || n.Contains("HABANA") || n.Contains("ICE 51") || n.Contains("NOCHE ICE") || n.Contains("OLD")) return "Tragos / Botellas";
+    return "Otros";
+}
+
 static async Task EnsureAppMeseraTables(MySqlConnection con)
 {
     await using (var alter1 = new MySqlCommand("ALTER TABLE productos ADD COLUMN genera_comision TINYINT(1) NOT NULL DEFAULT 0;", con))
@@ -2481,6 +3010,35 @@ static async Task EnsureAppMeseraTables(MySqlConnection con)
     await using (var alter4 = new MySqlCommand("ALTER TABLE productos ADD COLUMN sin_limite_stock TINYINT(1) NOT NULL DEFAULT 0;", con))
     {
         try { await alter4.ExecuteNonQueryAsync(); } catch { }
+    }
+
+    await using (var alter5 = new MySqlCommand("ALTER TABLE productos ADD COLUMN tipo_entrada VARCHAR(60) NOT NULL DEFAULT 'PAQUETE';", con))
+    {
+        try { await alter5.ExecuteNonQueryAsync(); } catch { }
+    }
+
+    await using (var alter6 = new MySqlCommand("ALTER TABLE productos ADD COLUMN unidades_por_entrada INT NOT NULL DEFAULT 1;", con))
+    {
+        try { await alter6.ExecuteNonQueryAsync(); } catch { }
+    }
+
+    await using (var alter7 = new MySqlCommand("ALTER TABLE productos ADD COLUMN precio_compra DECIMAL(10,2) NOT NULL DEFAULT 0;", con))
+    {
+        try { await alter7.ExecuteNonQueryAsync(); } catch { }
+    }
+
+    // Migración de nombres de categoría solicitados para el módulo Productos / Stock.
+    await using (var catMig = new MySqlCommand("""
+        UPDATE productos SET categoria = 'Cocas' WHERE categoria = 'Coca machucada';
+        UPDATE productos SET categoria = 'Otros' WHERE categoria IN ('Varios', 'Otros / Extras');
+        UPDATE productos SET categoria = 'Accesorios' WHERE categoria = 'Vasos/Accesorios';
+        UPDATE productos SET categoria = 'Ceniceros'
+        WHERE UPPER(nombre) LIKE '%CENICER%' OR UPPER(nombre) LIKE '%CINCERO%';
+        UPDATE productos SET categoria = 'Accesorios'
+        WHERE UPPER(nombre) IN ('ENCENDEDOR','COPAS DE VINO','VASO TEQUILERO','VASOS CERVECEROS','VASOS DE SODA','VASOS DE WISKI','VASOS DE WHISKY','VASO DE WISKI','VASO DE WISKIE','VASO DE WHISKY');
+    """, con))
+    {
+        try { await catMig.ExecuteNonQueryAsync(); } catch { }
     }
 
     await using (var cmd = new MySqlCommand("""
@@ -3288,6 +3846,33 @@ public record ProductCommissionRequest(
     bool GeneraComision,
     string TipoComision,
     decimal ValorComision
+);
+
+public sealed record AdminProductPresentationRequest(
+    long? PresentacionId,
+    string Nombre,
+    int CantidadBase,
+    decimal PrecioVenta,
+    string Estado
+);
+
+public sealed record AdminProductRequest(
+    long? ProductoId,
+    int SucursalId,
+    string Nombre,
+    string Categoria,
+    string TipoEntrada,
+    string UnidadBase,
+    int UnidadesPorEntrada,
+    decimal PrecioCompra,
+    decimal StockActual,
+    decimal StockMinimo,
+    bool SinLimiteStock,
+    bool GeneraComision,
+    string TipoComision,
+    decimal ValorComision,
+    string Estado,
+    List<AdminProductPresentationRequest>? Presentaciones
 );
 
 public record LoginRequest(string Usuario, string Clave);

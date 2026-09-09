@@ -1,0 +1,21 @@
+BILLAR EL BRUJO API - V32 STOCK CORREGIDO
+===========================================
+
+OBJETIVO
+Corregir el problema donde el programa mostraba los productos pero Railway devolvía stock_actual = 0 y volvía a dejar la pantalla en cero.
+
+NUEVO ENDPOINT
+POST /api/admin/aplicar-stock-inicial?clave=ENTREGAR_LIMPIO_2026&sucursalId=1
+GET  /api/admin/aplicar-stock-inicial?clave=ENTREGAR_LIMPIO_2026&sucursalId=1
+
+- Carga las cantidades visibles en las capturas de inventario proporcionadas.
+- Solo modifica stock_actual.
+- No cambia precios, categorías, presentaciones ni comisiones.
+- La V85 de escritorio usa este endpoint y luego vuelve a leer Railway para verificar la cantidad.
+
+DESPLIEGUE
+1. Reemplazar el contenido del repositorio conectado a Railway por esta carpeta.
+2. Commit + Push.
+3. Esperar el deploy de Railway.
+4. Abrir /health y confirmar: V32_STOCK_CORREGIDO.
+5. Abrir V85 > Productos / Stock > Cargar stock inicial.

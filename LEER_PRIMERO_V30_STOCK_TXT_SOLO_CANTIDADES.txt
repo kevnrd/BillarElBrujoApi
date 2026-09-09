@@ -1,0 +1,37 @@
+BILLAR EL BRUJO API - V30 STOCK TXT SOLO CANTIDADES
+
+OBJETIVO
+- Actualizar únicamente la columna stock_actual con las cantidades del archivo TXT.
+- Las cantidades se copian TAL CUAL y se interpretan como cantidad de PAQUETES.
+- NO cambia precios.
+- NO cambia nombres.
+- NO cambia categorías.
+- NO cambia presentaciones.
+- NO crea productos nuevos.
+- Usa alias para reconocer los nombres que ya aparecen en tu pantalla, por ejemplo:
+  AGUA 2L -> AGUA 2 LITROS
+  CERVEZA SKOL -> CERVEZA SKUL
+  BOHEM BLACK -> CIGARRO BOHEN BLACK
+  FLOR DE CAÑA -> RON FLOR DE CAÑA
+
+PASOS CON GITHUB + RAILWAY
+1. Sube esta versión V30 al mismo repositorio de GitHub que está conectado a Railway.
+2. Espera a que Railway termine el deploy.
+3. Revisa:
+   https://billarelbrujoapi-production.up.railway.app/health
+   Debe mostrar:
+   "version":"V30_STOCK_TXT_SOLO_CANTIDADES"
+
+4. Para aplicar las cantidades SOLO a la sucursal 1 abre:
+   https://billarelbrujoapi-production.up.railway.app/api/admin/aplicar-stock-txt?clave=ENTREGAR_LIMPIO_2026&sucursalId=1
+
+5. Para la sucursal 2, cuando corresponda:
+   https://billarelbrujoapi-production.up.railway.app/api/admin/aplicar-stock-txt?clave=ENTREGAR_LIMPIO_2026&sucursalId=2
+
+6. Actualiza la pantalla Gestión de Productos y revisa la columna Stock.
+
+IMPORTANTE
+- El endpoint devuelve una lista "faltantes". Esos son nombres del TXT que no encontró en Railway.
+- Si un producto no está en el TXT, NO se inventa una cantidad y queda como estaba.
+- La app de mesera NO necesita cambios: lee los productos desde esta API.
+- Incluí APLICAR_STOCK_TXT_SOLO_CANTIDADES.sql como respaldo manual.

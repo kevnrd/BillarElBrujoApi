@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V29_CATALOGO_FINAL_STOCK",
+            version = "V30_STOCK_TXT_SOLO_CANTIDADES",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -1157,6 +1157,146 @@ app.MapGet("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter shee
     });
 });
 
+
+
+app.MapPost("/api/admin/aplicar-stock-txt", async (Db db, SheetsReporter sheets, string clave, int sucursalId = 1) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+    if (sucursalId != 1 && sucursalId != 2)
+        return Results.BadRequest(new { ok = false, message = "sucursalId debe ser 1 o 2." });
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    int productosActualizados = 0;
+    var faltantes = new List<string>();
+
+    foreach (var item in StockSoloTxtV30())
+    {
+        long productoId = 0;
+
+        foreach (string alias in item.aliases)
+        {
+            await using var buscar = new MySqlCommand("""
+                SELECT id
+                FROM productos
+                WHERE sucursal_id = @sucursal_id
+                  AND UPPER(TRIM(nombre)) = UPPER(TRIM(@nombre))
+                  AND estado = 'ACTIVO'
+                LIMIT 1;
+            """, con);
+            buscar.Parameters.AddWithValue("@sucursal_id", sucursalId);
+            buscar.Parameters.AddWithValue("@nombre", alias);
+
+            var found = await buscar.ExecuteScalarAsync();
+            if (found != null)
+            {
+                productoId = Convert.ToInt64(found);
+                break;
+            }
+        }
+
+        if (productoId <= 0)
+        {
+            faltantes.Add(item.aliases[0]);
+            continue;
+        }
+
+        await using var actualizar = new MySqlCommand("""
+            UPDATE productos
+            SET stock_actual = @stock_actual
+            WHERE id = @id;
+        """, con);
+        actualizar.Parameters.AddWithValue("@stock_actual", item.cantidad);
+        actualizar.Parameters.AddWithValue("@id", productoId);
+        await actualizar.ExecuteNonQueryAsync();
+        productosActualizados++;
+    }
+
+    await TrySyncSheets(db, sheets);
+
+    return Results.Ok(new
+    {
+        ok = true,
+        version = "V30_STOCK_TXT_SOLO_CANTIDADES",
+        message = "Stock actualizado únicamente con las cantidades del TXT. No se modificaron precios, categorías ni presentaciones.",
+        criterio = "Las cantidades se copiaron tal cual están en el TXT y se interpretan como cantidad de paquetes.",
+        sucursalId,
+        productosActualizados,
+        faltantes
+    });
+});
+
+app.MapGet("/api/admin/aplicar-stock-txt", async (Db db, SheetsReporter sheets, string clave, int sucursalId = 1) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+    if (sucursalId != 1 && sucursalId != 2)
+        return Results.BadRequest(new { ok = false, message = "sucursalId debe ser 1 o 2." });
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    int productosActualizados = 0;
+    var faltantes = new List<string>();
+
+    foreach (var item in StockSoloTxtV30())
+    {
+        long productoId = 0;
+
+        foreach (string alias in item.aliases)
+        {
+            await using var buscar = new MySqlCommand("""
+                SELECT id
+                FROM productos
+                WHERE sucursal_id = @sucursal_id
+                  AND UPPER(TRIM(nombre)) = UPPER(TRIM(@nombre))
+                  AND estado = 'ACTIVO'
+                LIMIT 1;
+            """, con);
+            buscar.Parameters.AddWithValue("@sucursal_id", sucursalId);
+            buscar.Parameters.AddWithValue("@nombre", alias);
+
+            var found = await buscar.ExecuteScalarAsync();
+            if (found != null)
+            {
+                productoId = Convert.ToInt64(found);
+                break;
+            }
+        }
+
+        if (productoId <= 0)
+        {
+            faltantes.Add(item.aliases[0]);
+            continue;
+        }
+
+        await using var actualizar = new MySqlCommand("""
+            UPDATE productos
+            SET stock_actual = @stock_actual
+            WHERE id = @id;
+        """, con);
+        actualizar.Parameters.AddWithValue("@stock_actual", item.cantidad);
+        actualizar.Parameters.AddWithValue("@id", productoId);
+        await actualizar.ExecuteNonQueryAsync();
+        productosActualizados++;
+    }
+
+    await TrySyncSheets(db, sheets);
+
+    return Results.Ok(new
+    {
+        ok = true,
+        version = "V30_STOCK_TXT_SOLO_CANTIDADES",
+        message = "Stock actualizado únicamente con las cantidades del TXT. No se modificaron precios, categorías ni presentaciones.",
+        criterio = "Las cantidades se copiaron tal cual están en el TXT y se interpretan como cantidad de paquetes.",
+        sucursalId,
+        productosActualizados,
+        faltantes
+    });
+});
+
 app.MapPost("/api/productos", async (Db db, SheetsReporter sheets, ProductoRequest p) =>
 {
     await using var con = await db.OpenAsync();
@@ -1708,6 +1848,108 @@ static async Task TrySyncSheets(Db db, SheetsReporter sheets)
     }
 }
 
+
+static (decimal cantidad, string[] aliases)[] StockSoloTxtV30() => new (decimal cantidad, string[] aliases)[]
+{
+    (9m, new[] { "AGUA 2 LITROS", "AGUA 2L" }),
+    (11m, new[] { "AGUA PERSONAL CON GAS", "AGUA CON GAS" }),
+    (21m, new[] { "AGUA PERSONAL SIN GAS", "AGUA SIN GAS" }),
+    (11m, new[] { "AGUA TONICA" }),
+    (13m, new[] { "SANTE GRANDE" }),
+    (7m, new[] { "SANTE PEQUEÑO" }),
+    (7m, new[] { "BLACK" }),
+    (14m, new[] { "CICLON" }),
+    (5m, new[] { "POWER CHICO" }),
+    (4m, new[] { "POWER GRANDE" }),
+    (22m, new[] { "RED BULL" }),
+    (4m, new[] { "SODA COCA COLA 2 LITROS", "COCA COLA 2L" }),
+    (5m, new[] { "SODA COCA COLA 3 LITROS", "COCA COLA 3L" }),
+    (12m, new[] { "SODA FANTA 2 LITROS", "FANTA 2L" }),
+    (36m, new[] { "SODA PEQUE COCA COLA VARIOS", "PEQUE" }),
+    (15m, new[] { "SODA SPRITE 2 LITROS", "SPRITE 2L" }),
+    (5m, new[] { "COCA AMAIRE N" }),
+    (15m, new[] { "COCA EL BRUJO BICO STEVIA", "COCA BICO ESTEBIA" }),
+    (9m, new[] { "COCA EL BRUJO MARACUYA", "COCA MARACUYA" }),
+    (15m, new[] { "COCA EL BRUJO MEDUSA", "COCA MEDUSA" }),
+    (28m, new[] { "COCA MEDUSA N" }),
+    (8m, new[] { "COCA EL BRUJO RED BULL", "COCA REDBUL" }),
+    (3m, new[] { "COCA EL BRUJO SANDIA RED BULL", "COCA SANDIA REDBUL" }),
+    (8m, new[] { "COCA EL BRUJO YOGUBOLL", "COCA YOGUBOL" }),
+    (4m, new[] { "COCA YOGUBOL N" }),
+    (8m, new[] { "COCA EL BRUJO YOGOURT RED BULL", "COCA YOGURT REDBUL" }),
+    (10m, new[] { "CIGARRO BOHEN BLACK", "BOHEM BLACK" }),
+    (16m, new[] { "CIGARRO BOHEN SANDIA", "BOHEM SANDIA" }),
+    (0m, new[] { "CIGARRO BOHEN YOGOURT", "BOHEM YOGURT" }),
+    (9m, new[] { "CIGARRO CAMEL ACTIVA UNID", "CAMEL ACTIVA" }),
+    (1m, new[] { "CIGARRO CAMEL ATIVO CHICO", "CAMEL CHICO ACTIVA" }),
+    (43m, new[] { "CIGARRO CAMEL SANDIA CHICO", "CAMEL CHICO SANDIA" }),
+    (13m, new[] { "CIGARRO CAMEL SANDIA GRANDE", "CAMEL SANDIA" }),
+    (10m, new[] { "CIGARRO HILS", "HILLS" }),
+    (10m, new[] { "CIGARRO HILLS SANDI", "HILLS SANDIA" }),
+    (1m, new[] { "CERVEZA AMSTEL" }),
+    (16m, new[] { "CERVEZA CORONA" }),
+    (44m, new[] { "CERVEZA SKUL", "CERVEZA SKOL" }),
+    (1m, new[] { "AMARULA" }),
+    (2m, new[] { "FERNET" }),
+    (15m, new[] { "RON FLOR DE CAÑA", "FLOR DE CAÑA" }),
+    (22m, new[] { "FLOW ACHACHAIRU" }),
+    (12m, new[] { "FLOW CHUFLAY" }),
+    (12m, new[] { "FLOW NENE" }),
+    (17m, new[] { "FOUR LOCO" }),
+    (2m, new[] { "GIN ROSADO", "GIN" }),
+    (3m, new[] { "RON HABANA 7 AÑOS", "HAVANA" }),
+    (20m, new[] { "ICE 51" }),
+    (1m, new[] { "NOCHE ICE" }),
+    (0m, new[] { "RON DE COCO OLD", "OLD" }),
+    (2m, new[] { "RON ABUELO", "ABUELO" }),
+    (2m, new[] { "TEQUILA JOSE CUERVO", "TEQUILA" }),
+    (4m, new[] { "VINO BLANCO" }),
+    (14m, new[] { "VINO TINTO" }),
+    (1m, new[] { "QUISQUE BLACK LABEL", "WHIKY BLACK LABEL" }),
+    (2m, new[] { "COMBO FERNET" }),
+    (3m, new[] { "COMBO FLOR DE CAÑA" }),
+    (2m, new[] { "COMBO RON ABUELO" }),
+    (10m, new[] { "VASO CHUFLAY" }),
+    (10m, new[] { "VASO FERNET" }),
+    (10m, new[] { "VASO FLOR DE CAÑA" }),
+    (10m, new[] { "VASO RUM/RON ABUELO" }),
+    (10m, new[] { "VASO TEQUILA" }),
+    (10m, new[] { "VASO VINO" }),
+    (10m, new[] { "VASO VINO tinto" }),
+    (10m, new[] { "VASO WHISKY" }),
+    (0m, new[] { "NACHO LIMON" }),
+    (8m, new[] { "NACHO NORMAL" }),
+    (7m, new[] { "NACHOS PICANTES", "NACHO PICANTE" }),
+    (10m, new[] { "NACHO MAX QUESO", "NACHO SABOR QUESO" }),
+    (13m, new[] { "PAPA CHURRAZCO" }),
+    (4m, new[] { "PAPA NAX", "PAPA NAX NORMALES" }),
+    (4m, new[] { "PIZONES CHOCOLATE", "PINZONES CHOCOLATE" }),
+    (9m, new[] { "PIZONES PICANTES", "PIZONES PICANTE" }),
+    (5m, new[] { "PLATANITO CHIPS", "PLATANITO" }),
+    (0m, new[] { "TAKIS" }),
+    (0m, new[] { "ARCOR" }),
+    (0m, new[] { "BELDEN" }),
+    (44m, new[] { "CHICLE" }),
+    (11m, new[] { "CHICLE GRANDE" }),
+    (10m, new[] { "CHICLE PEQUEÑO" }),
+    (0m, new[] { "CHUPETE" }),
+    (73m, new[] { "CLORETS" }),
+    (14m, new[] { "COCA EL BRUJO CHICLE", "COCA CHICLE" }),
+    (4m, new[] { "COCA CHICLE N" }),
+    (12m, new[] { "PASTILLAS EUCALIPTO", "EUCALIPTO" }),
+    (24m, new[] { "GROSSO", "GROSO" }),
+    (10m, new[] { "HALLS" }),
+    (0m, new[] { "MABEL" }),
+    (6m, new[] { "PASTILLAS MINT", "MINT" }),
+    (4m, new[] { "DOCILE MINTY", "MINTY" }),
+    (2m, new[] { "ALIKAL" }),
+    (15m, new[] { "COPAS DE VINO", "COPA" }),
+    (14m, new[] { "MESAS" }),
+    (30m, new[] { "SILLAS" }),
+    (10m, new[] { "VASO DE WISKIE", "VASOS DE WISKI" }),
+    (4m, new[] { "VASO TEQUILERO", "VASOS TEQUILERO" }),
+    (86m, new[] { "VICO" }),
+};
 
 static (string nombre, string categoria, decimal cantidad, decimal precio, bool sinLimiteStock)[] CatalogoFinalV29() => new (string nombre, string categoria, decimal cantidad, decimal precio, bool sinLimiteStock)[]
 {

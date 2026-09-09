@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V27_REPORTES_PRODUCTOS_APP",
+            version = "V28_FIX_TIMEONLYTEXT",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -2564,7 +2564,7 @@ public sealed class SheetsReporter
         """)).Select(r => new List<object>
         {
             DateOnlyText(r, "fecha"),
-            TimeOnlyText(r, "fecha"),
+            DateTime.TryParse(Text(r, "fecha"), out var horaReporte) ? horaReporte.ToString("HH:mm:ss") : "",
             Text(r, "sucursal"),
             Text(r, "turno"),
             Text(r, "producto"),

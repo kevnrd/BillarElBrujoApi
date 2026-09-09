@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V26_COMISION_PRODUCTOS",
+            version = "V27_REPORTES_PRODUCTOS_APP",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -116,7 +116,8 @@ app.MapPost("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, s
         "mesa_estados",
         "detalle_pedidos_movil",
         "pedidos_movil",
-        "comisiones_meseras"
+        "comisiones_meseras",
+        "reportes_productos_movil"
     };
 
     List<string> cleaned = new();
@@ -186,7 +187,8 @@ app.MapGet("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, st
         "mesa_estados",
         "detalle_pedidos_movil",
         "pedidos_movil",
-        "comisiones_meseras"
+        "comisiones_meseras",
+        "reportes_productos_movil"
     };
 
     List<string> cleaned = new();
@@ -768,6 +770,74 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
         return Results.Problem("No se pudo registrar el pedido móvil: " + ex.Message);
     }
 });
+
+
+app.MapPost("/api/app-mesera/reportes-producto", async (Db db, ProductReportRequest req) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    string motivo = string.IsNullOrWhiteSpace(req.Motivo) ? "DAÑADO/PERDIDO" : req.Motivo.Trim().ToUpperInvariant();
+    string syncKey = string.IsNullOrWhiteSpace(req.SyncKey) ? Guid.NewGuid().ToString("N") : req.SyncKey;
+    decimal costo = req.Cantidad * req.PrecioUnitario;
+
+    const string sql = """
+        INSERT INTO reportes_productos_movil
+            (sucursal_id, turno, usuario, nombre, fecha, producto_id, presentacion_id,
+             producto, presentacion, cantidad, precio_unitario, costo_perdido, motivo, observacion, sync_key)
+        VALUES
+            (@sucursal_id, @turno, @usuario, @nombre, NOW(), @producto_id, @presentacion_id,
+             @producto, @presentacion, @cantidad, @precio_unitario, @costo_perdido, @motivo, @observacion, @sync_key)
+        ON DUPLICATE KEY UPDATE
+            cantidad = VALUES(cantidad),
+            precio_unitario = VALUES(precio_unitario),
+            costo_perdido = VALUES(costo_perdido),
+            motivo = VALUES(motivo),
+            observacion = VALUES(observacion);
+    """;
+
+    await using var cmd = new MySqlCommand(sql, con);
+    cmd.Parameters.AddWithValue("@sucursal_id", req.SucursalId <= 0 ? 1 : req.SucursalId);
+    cmd.Parameters.AddWithValue("@turno", string.IsNullOrWhiteSpace(req.Turno) ? "MAÑANA" : req.Turno.Trim().ToUpperInvariant());
+    cmd.Parameters.AddWithValue("@usuario", req.Usuario ?? "");
+    cmd.Parameters.AddWithValue("@nombre", req.Nombre ?? "");
+    cmd.Parameters.AddWithValue("@producto_id", req.ProductoId);
+    cmd.Parameters.AddWithValue("@presentacion_id", req.PresentacionId);
+    cmd.Parameters.AddWithValue("@producto", req.Producto ?? "");
+    cmd.Parameters.AddWithValue("@presentacion", req.Presentacion ?? "");
+    cmd.Parameters.AddWithValue("@cantidad", req.Cantidad);
+    cmd.Parameters.AddWithValue("@precio_unitario", req.PrecioUnitario);
+    cmd.Parameters.AddWithValue("@costo_perdido", costo);
+    cmd.Parameters.AddWithValue("@motivo", motivo);
+    cmd.Parameters.AddWithValue("@observacion", req.Observacion ?? "");
+    cmd.Parameters.AddWithValue("@sync_key", syncKey);
+    await cmd.ExecuteNonQueryAsync();
+
+    return Results.Ok(new { ok = true, costo_perdido = costo, message = "Reporte de producto registrado." });
+});
+
+app.MapGet("/api/admin/productos-reportados", async (Db db, string clave) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    const string sql = """
+        SELECT r.id, r.sucursal_id,
+               CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+               r.turno, r.usuario, r.nombre, r.fecha,
+               r.producto, r.presentacion, r.cantidad, r.precio_unitario,
+               r.costo_perdido, r.motivo, r.observacion
+        FROM reportes_productos_movil r
+        LEFT JOIN sucursales s ON s.id = r.sucursal_id
+        ORDER BY r.fecha DESC;
+    """;
+
+    return Results.Ok(await db.QueryAsync(con, sql));
+});
+
 
 app.MapGet("/api/app-mesera/pedidos-pendientes", async (Db db, int sucursalId) =>
 {
@@ -1959,6 +2029,33 @@ static async Task EnsureAppMeseraTables(MySqlConnection con)
         await cmd.ExecuteNonQueryAsync();
     }
 
+    await using (var cmd = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS reportes_productos_movil (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            sucursal_id INT NOT NULL,
+            turno VARCHAR(30) NOT NULL DEFAULT 'MAÑANA',
+            usuario VARCHAR(100) NOT NULL,
+            nombre VARCHAR(150) NOT NULL,
+            fecha DATETIME NOT NULL,
+            producto_id BIGINT NULL,
+            presentacion_id BIGINT NULL,
+            producto VARCHAR(180) NOT NULL,
+            presentacion VARCHAR(120) NULL,
+            cantidad DECIMAL(10,2) NOT NULL DEFAULT 0,
+            precio_unitario DECIMAL(10,2) NOT NULL DEFAULT 0,
+            costo_perdido DECIMAL(10,2) NOT NULL DEFAULT 0,
+            motivo VARCHAR(80) NOT NULL,
+            observacion VARCHAR(250) NULL,
+            sync_key VARCHAR(180) NOT NULL,
+            UNIQUE KEY uk_reporte_producto_sync (sync_key),
+            INDEX idx_reporte_producto_fecha (fecha),
+            INDEX idx_reporte_producto_sucursal (sucursal_id)
+        );
+    """, con))
+    {
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     await using (var seed = new MySqlCommand("""
         INSERT INTO usuarios (usuario, clave, rol, sucursal_id, estado)
         SELECT 'ana_mesera', 'mesera123', 'MESERA', 1, 'ACTIVO'
@@ -2452,6 +2549,34 @@ public sealed class SheetsReporter
             Val(r, "cantidad"), Val(r, "total")
         }));
 
+        List<List<object>> productosPerdidosMovil = new()
+        {
+            new() { "fecha", "hora", "sucursal", "turno", "producto", "presentacion", "cantidad", "precio_unitario", "costo_perdido", "registrado_por", "motivo", "observacion" }
+        };
+        productosPerdidosMovil.AddRange((await db.QueryAsync(con, """
+            SELECT r.fecha,
+                   CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
+                   r.turno, r.producto, r.presentacion, r.cantidad, r.precio_unitario,
+                   r.costo_perdido, r.nombre, r.motivo, r.observacion
+            FROM reportes_productos_movil r
+            LEFT JOIN sucursales s ON s.id = r.sucursal_id
+            ORDER BY r.fecha DESC;
+        """)).Select(r => new List<object>
+        {
+            DateOnlyText(r, "fecha"),
+            TimeOnlyText(r, "fecha"),
+            Text(r, "sucursal"),
+            Text(r, "turno"),
+            Text(r, "producto"),
+            Text(r, "presentacion"),
+            Val(r, "cantidad"),
+            Val(r, "precio_unitario"),
+            Val(r, "costo_perdido"),
+            Text(r, "nombre"),
+            Text(r, "motivo"),
+            Text(r, "observacion")
+        }));
+
         List<List<object>> gananciaNegocio = new()
         {
             new() { "fecha", "sucursal", "productos_vendidos", "uso_y_cobro_mesas", "total_ingreso", "ayuda_comida", "uso_interno", "perdidas", "neto_para_revisar" }
@@ -2475,7 +2600,7 @@ public sealed class SheetsReporter
         await InitSheetIfEmptyAsync(service, "Ayuda_Comida_Empleados", new List<object> { "fecha", "turno", "empleado", "oficio", "monto_comida", "autorizado_por", "observacion" });
         await InitSheetIfEmptyAsync(service, "Ingreso_Mercaderia", new List<object> { "fecha", "producto", "cantidad_que_entro", "unidad", "precio_compra", "total_compra", "registrado_por", "observacion" });
         await InitSheetIfEmptyAsync(service, "Productos_Usados_Sin_Venta", new List<object> { "fecha", "hora", "turno", "producto", "cantidad", "motivo", "para_quien_fue", "costo_aproximado", "autorizado_por", "observacion" });
-        await InitSheetIfEmptyAsync(service, "Productos_Perdidos_Danados", new List<object> { "fecha", "hora", "producto", "cantidad", "que_paso", "costo_perdido", "registrado_por", "observacion" });
+        await ReplaceSheetAsync(service, "Productos_Perdidos_Danados", productosPerdidosMovil);
         await InitSheetIfEmptyAsync(service, "Historial_Productos", new List<object> { "fecha", "hora", "producto", "tipo_movimiento", "cantidad", "responsable", "observacion" });
 
         return "Google Sheets actualizado desde MySQL Railway.";
@@ -2616,6 +2741,22 @@ public record MesaEstadoRequest(
     string? ClienteReserva,
     string? SyncKey,
     List<MesaConsumoVivoRequest>? Detalle
+);
+
+public record ProductReportRequest(
+    int SucursalId,
+    string Turno,
+    string Usuario,
+    string Nombre,
+    long ProductoId,
+    long PresentacionId,
+    string Producto,
+    string Presentacion,
+    decimal Cantidad,
+    decimal PrecioUnitario,
+    string Motivo,
+    string Observacion,
+    string SyncKey
 );
 
 public record ProductCommissionRequest(

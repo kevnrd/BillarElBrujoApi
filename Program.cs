@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V29_CATALOGO_FINAL_PRECIOS_STOCK",
+            version = "V29_CATALOGO_FINAL_STOCK",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -635,16 +635,18 @@ app.MapGet("/api/app-mesera/productos", async (Db db, int sucursalId) =>
           AND p.estado = 'ACTIVO'
         ORDER BY
             CASE
-                WHEN p.categoria = 'Bebidas' THEN 1
-                WHEN p.categoria = 'Cervezas' THEN 2
-                WHEN p.categoria = 'Botellas/Tragos' THEN 3
-                WHEN p.categoria = 'Cigarros' THEN 4
-                WHEN p.categoria = 'Dulces' THEN 5
-                WHEN p.categoria = 'Snacks' THEN 6
-                WHEN p.categoria = 'Vasos/Accesorios' THEN 7
-                WHEN p.categoria = 'Varios' THEN 8
-                WHEN p.categoria = 'Combo' THEN 9
-                WHEN p.categoria = 'Promoción' THEN 10
+                WHEN p.categoria = 'Agua' THEN 1
+                WHEN p.categoria = 'Energizantes' THEN 2
+                WHEN p.categoria = 'Sodas' THEN 3
+                WHEN p.categoria = 'Coca machucada' THEN 4
+                WHEN p.categoria = 'Cervezas' THEN 5
+                WHEN p.categoria = 'Tragos / Botellas' THEN 6
+                WHEN p.categoria = 'Servidos en vaso' THEN 7
+                WHEN p.categoria = 'Cigarros' THEN 8
+                WHEN p.categoria = 'Snacks y piqueos' THEN 9
+                WHEN p.categoria = 'Dulces y golosinas' THEN 10
+                WHEN p.categoria = 'Combos / Promos' THEN 11
+                WHEN p.categoria = 'Otros / Extras' THEN 12
                 ELSE 99
             END,
             p.nombre, pr.nombre;
@@ -980,22 +982,24 @@ app.MapGet("/api/productos", async (Db db, int? sucursalId) =>
 
     const string sql = """
         SELECT p.id, p.sucursal_id, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, p.nombre, p.categoria,
-               p.unidad_base, p.stock_actual, p.stock_minimo, p.estado
+               p.unidad_base, p.stock_actual, p.stock_minimo, COALESCE(p.sin_limite_stock, 0) AS sin_limite_stock, p.estado
         FROM productos p
         INNER JOIN sucursales s ON s.id = p.sucursal_id
         WHERE (@sucursalId IS NULL OR p.sucursal_id = @sucursalId)
         ORDER BY p.sucursal_id,
                  CASE
-                    WHEN p.categoria = 'Bebidas' THEN 1
-                    WHEN p.categoria = 'Cervezas' THEN 2
-                    WHEN p.categoria = 'Botellas/Tragos' THEN 3
-                    WHEN p.categoria = 'Cigarros' THEN 4
-                    WHEN p.categoria = 'Dulces' THEN 5
-                    WHEN p.categoria = 'Snacks' THEN 6
-                    WHEN p.categoria = 'Vasos/Accesorios' THEN 7
-                    WHEN p.categoria = 'Varios' THEN 8
-                    WHEN p.categoria = 'Combo' THEN 9
-                    WHEN p.categoria = 'Promoción' THEN 10
+                    WHEN p.categoria = 'Agua' THEN 1
+                    WHEN p.categoria = 'Energizantes' THEN 2
+                    WHEN p.categoria = 'Sodas' THEN 3
+                    WHEN p.categoria = 'Coca machucada' THEN 4
+                    WHEN p.categoria = 'Cervezas' THEN 5
+                    WHEN p.categoria = 'Tragos / Botellas' THEN 6
+                    WHEN p.categoria = 'Servidos en vaso' THEN 7
+                    WHEN p.categoria = 'Cigarros' THEN 8
+                    WHEN p.categoria = 'Snacks y piqueos' THEN 9
+                    WHEN p.categoria = 'Dulces y golosinas' THEN 10
+                    WHEN p.categoria = 'Combos / Promos' THEN 11
+                    WHEN p.categoria = 'Otros / Extras' THEN 12
                     ELSE 99
                  END,
                  p.nombre;
@@ -1022,22 +1026,27 @@ app.MapPost("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
 
     foreach (int sucursalId in new[] { 1, 2 })
     {
-        foreach (var item in CatalogoProductosLocalV29())
+        foreach (var item in CatalogoProductosLocalV19())
         {
-            bool updated = await UpsertCatalogoProductoLocal(con, sucursalId, item.nombre, item.categoria, item.precio, "Unidad", item.sinStock ? 0 : 30, item.sinStock ? 999999 : item.stock, item.sinStock);
+            bool updated = await UpsertCatalogoProductoLocal(con, sucursalId, item.nombre, item.categoria, item.precio, "Unidad", 5);
             if (updated) actualizados++; else insertados++;
         }
 
+        foreach (var item in CatalogoCombosPromosLocalV19())
+        {
+            bool updated = await UpsertCatalogoProductoLocal(con, sucursalId, item.nombre, item.categoria, item.precio, item.detalle, 2);
+            if (updated) actualizados++; else insertados++;
+        }
     }
 
     return Results.Ok(new
     {
         ok = true,
-        version = "V29_CATALOGO_FINAL_PRECIOS_STOCK",
-        message = "Catálogo final cargado en Railway con precios, cantidades y vasos sin límite de stock.",
+        version = "V19_CATALOGO_LOCAL_DULCES",
+        message = "Catálogo local cargado en Railway: productos, dulces, combos y promociones.",
         insertados,
         actualizados,
-        nota = "Los productos Servidos en vaso se cargan con stock 999999 para simular sin límite."
+        nota = "No se cargó PRUEBA porque parece dato de prueba."
     });
 });
 
@@ -1054,22 +1063,97 @@ app.MapGet("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
 
     foreach (int sucursalId in new[] { 1, 2 })
     {
-        foreach (var item in CatalogoProductosLocalV29())
+        foreach (var item in CatalogoProductosLocalV19())
         {
-            bool updated = await UpsertCatalogoProductoLocal(con, sucursalId, item.nombre, item.categoria, item.precio, "Unidad", item.sinStock ? 0 : 30, item.sinStock ? 999999 : item.stock, item.sinStock);
+            bool updated = await UpsertCatalogoProductoLocal(con, sucursalId, item.nombre, item.categoria, item.precio, "Unidad", 5);
             if (updated) actualizados++; else insertados++;
         }
 
+        foreach (var item in CatalogoCombosPromosLocalV19())
+        {
+            bool updated = await UpsertCatalogoProductoLocal(con, sucursalId, item.nombre, item.categoria, item.precio, item.detalle, 2);
+            if (updated) actualizados++; else insertados++;
+        }
     }
 
     return Results.Ok(new
     {
         ok = true,
-        version = "V29_CATALOGO_FINAL_PRECIOS_STOCK",
-        message = "Catálogo final cargado en Railway con precios, cantidades y vasos sin límite de stock.",
+        version = "V19_CATALOGO_LOCAL_DULCES",
+        message = "Catálogo local cargado en Railway: productos, dulces, combos y promociones.",
         insertados,
         actualizados,
-        nota = "Los productos Servidos en vaso se cargan con stock 999999 para simular sin límite."
+        nota = "No se cargó PRUEBA porque parece dato de prueba."
+    });
+});
+
+app.MapPost("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter sheets, string clave) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    int insertados = 0;
+    int actualizados = 0;
+
+    foreach (int sucursalId in new[] { 1, 2 })
+    {
+        foreach (var item in CatalogoFinalV29())
+        {
+            bool updated = await UpsertCatalogoFinalV29(con, sucursalId, item.nombre, item.categoria, item.cantidad, item.precio, item.sinLimiteStock);
+            if (updated) actualizados++; else insertados++;
+        }
+    }
+
+    await TrySyncSheets(db, sheets);
+
+    return Results.Ok(new
+    {
+        ok = true,
+        version = "V29_CATALOGO_FINAL_STOCK",
+        message = "Catálogo final cargado: cantidades, precios y productos en vaso sin límite de stock.",
+        productos = CatalogoFinalV29().Length,
+        sucursales = 2,
+        insertados,
+        actualizados,
+        nota = "Los productos de categoría Servidos en vaso quedan con sin_limite_stock = 1 y no descuentan inventario."
+    });
+});
+
+app.MapGet("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter sheets, string clave) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    int insertados = 0;
+    int actualizados = 0;
+
+    foreach (int sucursalId in new[] { 1, 2 })
+    {
+        foreach (var item in CatalogoFinalV29())
+        {
+            bool updated = await UpsertCatalogoFinalV29(con, sucursalId, item.nombre, item.categoria, item.cantidad, item.precio, item.sinLimiteStock);
+            if (updated) actualizados++; else insertados++;
+        }
+    }
+
+    await TrySyncSheets(db, sheets);
+
+    return Results.Ok(new
+    {
+        ok = true,
+        version = "V29_CATALOGO_FINAL_STOCK",
+        message = "Catálogo final cargado: cantidades, precios y productos en vaso sin límite de stock.",
+        productos = CatalogoFinalV29().Length,
+        sucursales = 2,
+        insertados,
+        actualizados,
+        nota = "Los productos de categoría Servidos en vaso quedan con sin_limite_stock = 1 y no descuentan inventario."
     });
 });
 
@@ -1101,6 +1185,7 @@ app.MapPost("/api/productos", async (Db db, SheetsReporter sheets, ProductoReque
 app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest venta) =>
 {
     await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
     await using var tx = await con.BeginTransactionAsync();
 
     try
@@ -1197,7 +1282,11 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 
             await using var stockCmd = new MySqlCommand("""
                 UPDATE productos
-                SET stock_actual = GREATEST(stock_actual - @cantidad_base, 0)
+                SET stock_actual = CASE
+                    WHEN COALESCE(sin_limite_stock, 0) = 1 OR categoria = 'Servidos en vaso'
+                    THEN stock_actual
+                    ELSE GREATEST(stock_actual - @cantidad_base, 0)
+                END
                 WHERE id = @producto_id;
             """, con, tx);
             stockCmd.Parameters.AddWithValue("@cantidad_base", d.CantidadBase <= 0 ? d.Cantidad : d.CantidadBase);
@@ -1620,106 +1709,203 @@ static async Task TrySyncSheets(Db db, SheetsReporter sheets)
 }
 
 
-static (string nombre, string categoria, decimal precio, int stock, bool sinStock)[] CatalogoProductosLocalV29() => new (string nombre, string categoria, decimal precio, int stock, bool sinStock)[]
+static (string nombre, string categoria, decimal cantidad, decimal precio, bool sinLimiteStock)[] CatalogoFinalV29() => new (string nombre, string categoria, decimal cantidad, decimal precio, bool sinLimiteStock)[]
 {
-    ("AGUA 2L", "Agua", 20.00m, 9, false),
-    ("AGUA CON GAS", "Agua", 10.00m, 11, false),
-    ("AGUA SIN GAS", "Agua", 10.00m, 21, false),
-    ("AGUA TONICA", "Agua", 20.00m, 11, false),
-    ("SANTE GRANDE", "Agua", 25.00m, 13, false),
-    ("SANTE PEQUEÑO", "Agua", 18.00m, 7, false),
-    ("BLACK", "Energizantes", 20.00m, 7, false),
-    ("CICLON", "Energizantes", 20.00m, 14, false),
-    ("POWER CHICO", "Energizantes", 15.00m, 5, false),
-    ("POWER GRANDE", "Energizantes", 25.00m, 4, false),
-    ("RED BULL", "Energizantes", 30.00m, 22, false),
-    ("COCA COLA 2L", "Sodas", 25.00m, 4, false),
-    ("COCA COLA 3L", "Sodas", 30.00m, 5, false),
-    ("FANTA 2L", "Sodas", 25.00m, 12, false),
-    ("PEQUE", "Sodas", 6.00m, 36, false),
-    ("SPRITE 2L", "Sodas", 25.00m, 15, false),
-    ("COCA AMAIRE N", "Coca machucada", 55.00m, 5, false),
-    ("COCA BICO ESTEBIA", "Coca machucada", 55.00m, 15, false),
-    ("COCA MARACUYA", "Coca machucada", 55.00m, 9, false),
-    ("COCA MEDUSA", "Coca machucada", 65.00m, 15, false),
-    ("COCA MEDUSA N", "Coca machucada", 65.00m, 28, false),
-    ("COCA REDBUL", "Coca machucada", 55.00m, 8, false),
-    ("COCA SANDIA REDBUL", "Coca machucada", 55.00m, 3, false),
-    ("COCA YOGUBOL", "Coca machucada", 55.00m, 8, false),
-    ("COCA YOGUBOL N", "Coca machucada", 55.00m, 4, false),
-    ("COCA YOGURT REDBUL", "Coca machucada", 55.00m, 8, false),
-    ("BOHEM BLACK", "Cigarros", 30.00m, 10, false),
-    ("BOHEM SANDIA", "Cigarros", 25.00m, 16, false),
-    ("BOHEM YOGURT", "Cigarros", 25.00m, 0, false),
-    ("CAMEL ACTIVA", "Cigarros", 2.00m, 9, false),
-    ("CAMEL CHICO ACTIVA", "Cigarros", 18.00m, 1, false),
-    ("CAMEL CHICO SANDIA", "Cigarros", 20.00m, 43, false),
-    ("CAMEL SANDIA", "Cigarros", 30.00m, 13, false),
-    ("HILLS", "Cigarros", 18.00m, 10, false),
-    ("HILLS SANDIA", "Cigarros", 18.00m, 10, false),
-    ("CERVEZA AMSTEL", "Cervezas", 22.00m, 1, false),
-    ("CERVEZA CORONA", "Cervezas", 25.00m, 16, false),
-    ("CERVEZA SKOL", "Cervezas", 10.00m, 44, false),
-    ("AMARULA", "Tragos / Botellas", 50.00m, 1, false),
-    ("FERNET", "Tragos / Botellas", 275.00m, 2, false),
-    ("FLOR DE CAÑA", "Tragos / Botellas", 275.00m, 15, false),
-    ("FLOW ACHACHAIRU", "Tragos / Botellas", 25.00m, 22, false),
-    ("FLOW CHUFLAY", "Tragos / Botellas", 25.00m, 12, false),
-    ("FLOW NENE", "Tragos / Botellas", 25.00m, 12, false),
-    ("FOUR LOCO", "Tragos / Botellas", 70.00m, 17, false),
-    ("GIN", "Tragos / Botellas", 275.00m, 2, false),
-    ("HAVANA", "Tragos / Botellas", 425.00m, 3, false),
-    ("ICE 51", "Tragos / Botellas", 30.00m, 20, false),
-    ("NOCHE ICE", "Tragos / Botellas", 25.00m, 1, false),
-    ("OLD", "Tragos / Botellas", 300.00m, 0, false),
-    ("RON ABUELO", "Tragos / Botellas", 300.00m, 2, false),
-    ("TEQUILA", "Tragos / Botellas", 200.00m, 2, false),
-    ("VINO BLANCO", "Tragos / Botellas", 50.00m, 4, false),
-    ("VINO TINTO", "Tragos / Botellas", 50.00m, 14, false),
-    ("WHIKY BLACK LABEL", "Tragos / Botellas", 800.00m, 1, false),
-    ("COMBO FERNET", "Combos / Promos", 320.00m, 2, false),
-    ("COMBO FLOR DE CAÑA", "Combos / Promos", 310.00m, 3, false),
-    ("COMBO RON ABUELO", "Combos / Promos", 340.00m, 2, false),
-    ("VASO CHUFLAY", "Servidos en vaso", 25.00m, 10, true),
-    ("VASO FERNET", "Servidos en vaso", 25.00m, 10, true),
-    ("VASO FLOR DE CAÑA", "Servidos en vaso", 25.00m, 10, true),
-    ("VASO RUM/RON ABUELO", "Servidos en vaso", 25.00m, 10, true),
-    ("VASO TEQUILA", "Servidos en vaso", 20.00m, 10, true),
-    ("VASO VINO", "Servidos en vaso", 15.00m, 10, true),
-    ("VASO VINO tinto", "Servidos en vaso", 15.00m, 10, true),
-    ("VASO WHISKY", "Servidos en vaso", 35.00m, 10, true),
-    ("NACHO LIMON", "Snacks y piqueos", 5.00m, 0, false),
-    ("NACHO NORMAL", "Snacks y piqueos", 5.00m, 8, false),
-    ("NACHO PICANTE", "Snacks y piqueos", 5.00m, 7, false),
-    ("NACHO SABOR QUESO", "Snacks y piqueos", 5.00m, 10, false),
-    ("PAPA CHURRAZCO", "Snacks y piqueos", 5.00m, 13, false),
-    ("PAPA NAX NORMALES", "Snacks y piqueos", 5.00m, 4, false),
-    ("PINZONES CHOCOLATE", "Snacks y piqueos", 5.00m, 4, false),
-    ("PIZONES PICANTE", "Snacks y piqueos", 5.00m, 9, false),
-    ("PLATANITO", "Snacks y piqueos", 5.00m, 5, false),
-    ("TAKIS", "Snacks y piqueos", 8.00m, 0, false),
-    ("ARCOR", "Dulces y golosinas", 1.00m, 0, false),
-    ("BELDEN", "Dulces y golosinas", 8.00m, 0, false),
-    ("CHICLE", "Dulces y golosinas", 1.00m, 44, false),
-    ("CHICLE GRANDE", "Dulces y golosinas", 4.00m, 11, false),
-    ("CHICLE PEQUEÑO", "Dulces y golosinas", 1.00m, 10, false),
-    ("CHUPETE", "Dulces y golosinas", 2.00m, 0, false),
-    ("CLORETS", "Dulces y golosinas", 1.00m, 73, false),
-    ("COCA CHICLE", "Dulces y golosinas", 55.00m, 14, false),
-    ("COCA CHICLE N", "Dulces y golosinas", 55.00m, 4, false),
-    ("EUCALIPTO", "Dulces y golosinas", 0.50m, 12, false),
-    ("GROSO", "Dulces y golosinas", 1.00m, 24, false),
-    ("HALLS", "Dulces y golosinas", 8.00m, 10, false),
-    ("MABEL", "Dulces y golosinas", 6.00m, 0, false),
-    ("MINT", "Dulces y golosinas", 0.50m, 6, false),
-    ("MINTY", "Dulces y golosinas", 5.00m, 4, false),
-    ("ALIKAL", "Otros / Extras", 10.00m, 2, false),
-    ("COPA", "Otros / Extras", 10.00m, 15, false),
-    ("MESAS", "Otros / Extras", 0.00m, 14, false),
-    ("SILLAS", "Otros / Extras", 0.00m, 30, false),
-    ("VASOS DE WISKI", "Otros / Extras", 10.00m, 10, false),
-    ("VASOS TEQUILERO", "Otros / Extras", 10.00m, 4, false),
-    ("VICO", "Otros / Extras", 1.00m, 86, false)
+    ("AGUA 2L", "Agua", 9m, 20.00m, false),
+    ("AGUA CON GAS", "Agua", 11m, 10.00m, false),
+    ("AGUA SIN GAS", "Agua", 21m, 10.00m, false),
+    ("AGUA TONICA", "Agua", 11m, 20.00m, false),
+    ("SANTE GRANDE", "Agua", 13m, 25.00m, false),
+    ("SANTE PEQUEÑO", "Agua", 7m, 18.00m, false),
+    ("BLACK", "Energizantes", 7m, 20.00m, false),
+    ("CICLON", "Energizantes", 14m, 20.00m, false),
+    ("POWER CHICO", "Energizantes", 5m, 15.00m, false),
+    ("POWER GRANDE", "Energizantes", 4m, 25.00m, false),
+    ("RED BULL", "Energizantes", 22m, 30.00m, false),
+    ("COCA COLA 2L", "Sodas", 4m, 25.00m, false),
+    ("COCA COLA 3L", "Sodas", 5m, 30.00m, false),
+    ("FANTA 2L", "Sodas", 12m, 25.00m, false),
+    ("PEQUE", "Sodas", 36m, 6.00m, false),
+    ("SPRITE 2L", "Sodas", 15m, 25.00m, false),
+    ("COCA AMAIRE N", "Coca machucada", 5m, 55.00m, false),
+    ("COCA BICO ESTEBIA", "Coca machucada", 15m, 55.00m, false),
+    ("COCA MARACUYA", "Coca machucada", 9m, 55.00m, false),
+    ("COCA MEDUSA", "Coca machucada", 15m, 65.00m, false),
+    ("COCA MEDUSA N", "Coca machucada", 28m, 65.00m, false),
+    ("COCA REDBUL", "Coca machucada", 8m, 55.00m, false),
+    ("COCA SANDIA REDBUL", "Coca machucada", 3m, 55.00m, false),
+    ("COCA YOGUBOL", "Coca machucada", 8m, 55.00m, false),
+    ("COCA YOGUBOL N", "Coca machucada", 4m, 55.00m, false),
+    ("COCA YOGURT REDBUL", "Coca machucada", 8m, 55.00m, false),
+    ("BOHEM BLACK", "Cigarros", 10m, 30.00m, false),
+    ("BOHEM SANDIA", "Cigarros", 16m, 25.00m, false),
+    ("BOHEM YOGURT", "Cigarros", 0m, 25.00m, false),
+    ("CAMEL ACTIVA", "Cigarros", 9m, 2.00m, false),
+    ("CAMEL CHICO ACTIVA", "Cigarros", 1m, 18.00m, false),
+    ("CAMEL CHICO SANDIA", "Cigarros", 43m, 20.00m, false),
+    ("CAMEL SANDIA", "Cigarros", 13m, 30.00m, false),
+    ("HILLS", "Cigarros", 10m, 18.00m, false),
+    ("HILLS SANDIA", "Cigarros", 10m, 18.00m, false),
+    ("CERVEZA AMSTEL", "Cervezas", 1m, 22.00m, false),
+    ("CERVEZA CORONA", "Cervezas", 16m, 25.00m, false),
+    ("CERVEZA SKOL", "Cervezas", 44m, 10.00m, false),
+    ("AMARULA", "Tragos / Botellas", 1m, 50.00m, false),
+    ("FERNET", "Tragos / Botellas", 2m, 275.00m, false),
+    ("FLOR DE CAÑA", "Tragos / Botellas", 15m, 275.00m, false),
+    ("FLOW ACHACHAIRU", "Tragos / Botellas", 22m, 25.00m, false),
+    ("FLOW CHUFLAY", "Tragos / Botellas", 12m, 25.00m, false),
+    ("FLOW NENE", "Tragos / Botellas", 12m, 25.00m, false),
+    ("FOUR LOCO", "Tragos / Botellas", 17m, 70.00m, false),
+    ("GIN", "Tragos / Botellas", 2m, 275.00m, false),
+    ("HAVANA", "Tragos / Botellas", 3m, 425.00m, false),
+    ("ICE 51", "Tragos / Botellas", 20m, 30.00m, false),
+    ("NOCHE ICE", "Tragos / Botellas", 1m, 25.00m, false),
+    ("OLD", "Tragos / Botellas", 0m, 300.00m, false),
+    ("RON ABUELO", "Tragos / Botellas", 2m, 300.00m, false),
+    ("TEQUILA", "Tragos / Botellas", 2m, 200.00m, false),
+    ("VINO BLANCO", "Tragos / Botellas", 4m, 50.00m, false),
+    ("VINO TINTO", "Tragos / Botellas", 14m, 50.00m, false),
+    ("WHIKY BLACK LABEL", "Tragos / Botellas", 1m, 800.00m, false),
+    ("COMBO FERNET", "Combos / Promos", 2m, 320.00m, false),
+    ("COMBO FLOR DE CAÑA", "Combos / Promos", 3m, 310.00m, false),
+    ("COMBO RON ABUELO", "Combos / Promos", 2m, 340.00m, false),
+    ("VASO CHUFLAY", "Servidos en vaso", 10m, 25.00m, true),
+    ("VASO FERNET", "Servidos en vaso", 10m, 25.00m, true),
+    ("VASO FLOR DE CAÑA", "Servidos en vaso", 10m, 25.00m, true),
+    ("VASO RUM/RON ABUELO", "Servidos en vaso", 10m, 25.00m, true),
+    ("VASO TEQUILA", "Servidos en vaso", 10m, 20.00m, true),
+    ("VASO VINO", "Servidos en vaso", 10m, 15.00m, true),
+    ("VASO VINO tinto", "Servidos en vaso", 10m, 15.00m, true),
+    ("VASO WHISKY", "Servidos en vaso", 10m, 35.00m, true),
+    ("NACHO LIMON", "Snacks y piqueos", 0m, 5.00m, false),
+    ("NACHO NORMAL", "Snacks y piqueos", 8m, 5.00m, false),
+    ("NACHO PICANTE", "Snacks y piqueos", 7m, 5.00m, false),
+    ("NACHO SABOR QUESO", "Snacks y piqueos", 10m, 5.00m, false),
+    ("PAPA CHURRAZCO", "Snacks y piqueos", 13m, 5.00m, false),
+    ("PAPA NAX NORMALES", "Snacks y piqueos", 4m, 5.00m, false),
+    ("PINZONES CHOCOLATE", "Snacks y piqueos", 4m, 5.00m, false),
+    ("PIZONES PICANTE", "Snacks y piqueos", 9m, 5.00m, false),
+    ("PLATANITO", "Snacks y piqueos", 5m, 5.00m, false),
+    ("TAKIS", "Snacks y piqueos", 0m, 8.00m, false),
+    ("ARCOR", "Dulces y golosinas", 0m, 1.00m, false),
+    ("BELDEN", "Dulces y golosinas", 0m, 8.00m, false),
+    ("CHICLE", "Dulces y golosinas", 44m, 1.00m, false),
+    ("CHICLE GRANDE", "Dulces y golosinas", 11m, 4.00m, false),
+    ("CHICLE PEQUEÑO", "Dulces y golosinas", 10m, 1.00m, false),
+    ("CHUPETE", "Dulces y golosinas", 0m, 2.00m, false),
+    ("CLORETS", "Dulces y golosinas", 73m, 1.00m, false),
+    ("COCA CHICLE", "Dulces y golosinas", 14m, 55.00m, false),
+    ("COCA CHICLE N", "Dulces y golosinas", 4m, 55.00m, false),
+    ("EUCALIPTO", "Dulces y golosinas", 12m, 0.50m, false),
+    ("GROSO", "Dulces y golosinas", 24m, 1.00m, false),
+    ("HALLS", "Dulces y golosinas", 10m, 8.00m, false),
+    ("MABEL", "Dulces y golosinas", 0m, 6.00m, false),
+    ("MINT", "Dulces y golosinas", 6m, 0.50m, false),
+    ("MINTY", "Dulces y golosinas", 4m, 5.00m, false),
+    ("ALIKAL", "Otros / Extras", 2m, 10.00m, false),
+    ("COPA", "Otros / Extras", 15m, 10.00m, false),
+    ("MESAS", "Otros / Extras", 14m, 0.00m, false),
+    ("SILLAS", "Otros / Extras", 30m, 0.00m, false),
+    ("VASOS DE WISKI", "Otros / Extras", 10m, 10.00m, false),
+    ("VASOS TEQUILERO", "Otros / Extras", 4m, 10.00m, false),
+    ("VICO", "Otros / Extras", 86m, 1.00m, false)
+};
+
+static (string nombre, string categoria, decimal precio)[] CatalogoProductosLocalV19() => new (string nombre, string categoria, decimal precio)[]
+{
+    ("AGUA 2 LITROS", "Bebidas", 20.00m),
+    ("AGUA PERSONAL CON GAS", "Bebidas", 10.00m),
+    ("AGUA PERSONAL SIN GAS", "Bebidas", 10.00m),
+    ("AGUA TONICA", "Bebidas", 20.00m),
+    ("CICLON", "Bebidas", 20.00m),
+    ("COCA EL BRUJO MARACUYA", "Bebidas", 25.00m),
+    ("COCA EL BRUJO MEDUSA", "Bebidas", 35.00m),
+    ("COCA EL BRUJO RED BULL", "Bebidas", 25.00m),
+    ("COCA EL BRUJO SANDIA RED BULL", "Bebidas", 25.00m),
+    ("COCA EL BRUJO YOGOURT RED BULL", "Bebidas", 25.00m),
+    ("COCA EL BRUJO YOGUBOLL", "Bebidas", 25.00m),
+    ("FLOW ACHACHAIRU", "Bebidas", 25.00m),
+    ("FLOW CHUFLAY", "Bebidas", 25.00m),
+    ("FLOW SIN AZUCAR", "Bebidas", 25.00m),
+    ("POWER CHICO", "Bebidas", 18.00m),
+    ("POWER GRANDE", "Bebidas", 25.00m),
+    ("RED BULL", "Bebidas", 30.00m),
+    ("SODA COCA COLA 2 LITROS", "Bebidas", 25.00m),
+    ("SODA COCA COLA 3 LITROS", "Bebidas", 30.00m),
+    ("SODA FANTA 2 LITROS", "Bebidas", 25.00m),
+    ("SODA PEQUE COCA COLA VARIOS", "Bebidas", 6.00m),
+    ("SODA SPRITE 2 LITROS", "Bebidas", 25.00m),
+    ("VASOS DE SODA", "Bebidas", 10.00m),
+    ("CERVEZA AMSTEL", "Cervezas", 22.00m),
+    ("CERVEZA CONTI", "Cervezas", 20.00m),
+    ("CERVEZA CORONA", "Cervezas", 25.00m),
+    ("CERVEZA PACEÑA", "Cervezas", 30.00m),
+    ("CERVEZA SKUL", "Cervezas", 10.00m),
+    ("BLACK", "Botellas/Tragos", 20.00m),
+    ("FERNET", "Botellas/Tragos", 275.00m),
+    ("FOUR LOCO", "Botellas/Tragos", 70.00m),
+    ("GIN ROSADO", "Botellas/Tragos", 275.00m),
+    ("ICE 51", "Botellas/Tragos", 30.00m),
+    ("NOCHE ICE", "Botellas/Tragos", 25.00m),
+    ("QUISQUE BLACK LABEL", "Botellas/Tragos", 800.00m),
+    ("RON ABUELO", "Botellas/Tragos", 300.00m),
+    ("RON DE COCO OLD", "Botellas/Tragos", 300.00m),
+    ("RON FLOR DE CAÑA", "Botellas/Tragos", 275.00m),
+    ("RON HABANA 7 AÑOS", "Botellas/Tragos", 425.00m),
+    ("TEQUILA JOSE CUERVO", "Botellas/Tragos", 200.00m),
+    ("VASO DE FERNET + COCA COLA 2L E 3L", "Botellas/Tragos", 20.00m),
+    ("VASO DE RON", "Botellas/Tragos", 20.00m),
+    ("VASO DE WISKIE", "Botellas/Tragos", 10.00m),
+    ("VINO BLANCO", "Botellas/Tragos", 50.00m),
+    ("VINO TINTO", "Botellas/Tragos", 50.00m),
+    ("CIGARRO BOHEM DOUBLE GRANDE", "Cigarros", 30.00m),
+    ("CIGARRO BOHEM UND", "Cigarros", 2.00m),
+    ("CIGARRO BOHEN BLACK", "Cigarros", 30.00m),
+    ("CIGARRO BOHEN SANDIA", "Cigarros", 25.00m),
+    ("CIGARRO BOHEN UNIDAD", "Cigarros", 2.00m),
+    ("CIGARRO BOHEN YOGOURT", "Cigarros", 25.00m),
+    ("CIGARRO CAMEL ACTIVA UNID", "Cigarros", 2.00m),
+    ("CIGARRO CAMEL ATIVO CHICO", "Cigarros", 18.00m),
+    ("CIGARRO CAMEL GRANDE ACTIVA", "Cigarros", 30.00m),
+    ("CIGARRO CAMEL SANDI UNIDAD", "Cigarros", 2.00m),
+    ("CIGARRO CAMEL SANDIA CHICO", "Cigarros", 20.00m),
+    ("CIGARRO CAMEL SANDIA GRANDE", "Cigarros", 30.00m),
+    ("CIGARRO HILLS SANDI", "Cigarros", 18.00m),
+    ("CIGARRO HILS", "Cigarros", 18.00m),
+    ("BICO SABORES", "Dulces", 5.00m),
+    ("CHICLE", "Dulces", 1.00m),
+    ("CHICLE GRANDE", "Dulces", 4.00m),
+    ("CHICLE PEQUEÑO", "Dulces", 1.00m),
+    ("CHUPETE", "Dulces", 2.00m),
+    ("CLORETS", "Dulces", 1.00m),
+    ("COCA EL BRUJO BICO STEVIA", "Dulces", 25.00m),
+    ("COCA EL BRUJO CHICLE", "Dulces", 25.00m),
+    ("DOCILE MINTY", "Dulces", 5.00m),
+    ("GROSSO", "Dulces", 1.00m),
+    ("HALLS", "Dulces", 8.00m),
+    ("MABEL", "Dulces", 6.00m),
+    ("PASTILLAS EUCALIPTO", "Dulces", 0.50m),
+    ("PASTILLAS MINT", "Dulces", 0.50m),
+    ("MIX NAX", "Snacks", 8.00m),
+    ("NACHO MAX QUESO", "Snacks", 5.00m),
+    ("NACHO NORMAL", "Snacks", 5.00m),
+    ("NACHOS PICANTES", "Snacks", 5.00m),
+    ("PAPA NAX", "Snacks", 5.00m),
+    ("PAPAS NORMALES", "Snacks", 5.00m),
+    ("PAPAS PICANTES", "Snacks", 5.00m),
+    ("PIZONES CHOCOLATE", "Snacks", 5.00m),
+    ("PIZONES PICANTES", "Snacks", 5.00m),
+    ("PLATANITO CHIPS", "Snacks", 5.00m),
+    ("SANTE GRANDE", "Snacks", 25.00m),
+    ("SANTE PEQUEÑO", "Snacks", 18.00m),
+    ("TAKIS", "Snacks", 8.00m),
+    ("CINCERO", "Vasos/Accesorios", 10.00m),
+    ("COPAS DE VINO", "Vasos/Accesorios", 10.00m),
+    ("ENCENDEDOR", "Vasos/Accesorios", 3.00m),
+    ("VASO TEQUILERO", "Vasos/Accesorios", 10.00m),
+    ("VASOS CERVECEROS", "Vasos/Accesorios", 10.00m),
+    ("ALIKAL", "Varios", 10.00m),
+    ("BELDEN", "Varios", 8.00m)
 };
 
 static (string nombre, string categoria, decimal precio, string detalle)[] CatalogoCombosPromosLocalV19() => new (string nombre, string categoria, decimal precio, string detalle)[]
@@ -1737,7 +1923,102 @@ static (string nombre, string categoria, decimal precio, string detalle)[] Catal
     ("PROMO VASO DE FERNET", "Promoción", 15.00m, "1x VASO DE FERNET")
 };
 
-static async Task<bool> UpsertCatalogoProductoLocal(MySqlConnection con, int sucursalId, string nombre, string categoria, decimal precio, string presentacion, int minimo, int stockActual, bool sinStock)
+static async Task<bool> UpsertCatalogoFinalV29(MySqlConnection con, int sucursalId, string nombre, string categoria, decimal cantidad, decimal precio, bool sinLimiteStock)
+{
+    long productoId = 0;
+
+    await using (var buscar = new MySqlCommand("SELECT id FROM productos WHERE sucursal_id = @sucursal_id AND nombre = @nombre LIMIT 1;", con))
+    {
+        buscar.Parameters.AddWithValue("@sucursal_id", sucursalId);
+        buscar.Parameters.AddWithValue("@nombre", nombre);
+        object? found = await buscar.ExecuteScalarAsync();
+        if (found != null) productoId = Convert.ToInt64(found);
+    }
+
+    bool existed = productoId > 0;
+    decimal stockActual = sinLimiteStock ? 0 : cantidad;
+    decimal stockMinimo = sinLimiteStock ? 0 : 30;
+    string unidadBase = sinLimiteStock ? "SIN LÍMITE" : "UNIDAD";
+
+    if (!existed)
+    {
+        await using var cmd = new MySqlCommand("""
+            INSERT INTO productos
+                (sucursal_id, nombre, categoria, unidad_base, stock_actual, stock_minimo, estado, genera_comision, tipo_comision, valor_comision, sin_limite_stock)
+            VALUES
+                (@sucursal_id, @nombre, @categoria, @unidad_base, @stock_actual, @stock_minimo, 'ACTIVO', @genera_comision, @tipo_comision, @valor_comision, @sin_limite_stock);
+            SELECT LAST_INSERT_ID();
+        """, con);
+        cmd.Parameters.AddWithValue("@sucursal_id", sucursalId);
+        cmd.Parameters.AddWithValue("@nombre", nombre);
+        cmd.Parameters.AddWithValue("@categoria", categoria);
+        cmd.Parameters.AddWithValue("@unidad_base", unidadBase);
+        cmd.Parameters.AddWithValue("@stock_actual", stockActual);
+        cmd.Parameters.AddWithValue("@stock_minimo", stockMinimo);
+        cmd.Parameters.AddWithValue("@genera_comision", EsProductoConComision(nombre));
+        cmd.Parameters.AddWithValue("@tipo_comision", EsProductoConComision(nombre) ? "PORCENTAJE" : "NINGUNA");
+        cmd.Parameters.AddWithValue("@valor_comision", EsProductoConComision(nombre) ? 10 : 0);
+        cmd.Parameters.AddWithValue("@sin_limite_stock", sinLimiteStock ? 1 : 0);
+        productoId = Convert.ToInt64(await cmd.ExecuteScalarAsync());
+    }
+    else
+    {
+        await using var cmd = new MySqlCommand("""
+            UPDATE productos
+            SET categoria = @categoria,
+                unidad_base = @unidad_base,
+                stock_actual = @stock_actual,
+                stock_minimo = @stock_minimo,
+                estado = 'ACTIVO',
+                sin_limite_stock = @sin_limite_stock
+            WHERE id = @id;
+        """, con);
+        cmd.Parameters.AddWithValue("@categoria", categoria);
+        cmd.Parameters.AddWithValue("@unidad_base", unidadBase);
+        cmd.Parameters.AddWithValue("@stock_actual", stockActual);
+        cmd.Parameters.AddWithValue("@stock_minimo", stockMinimo);
+        cmd.Parameters.AddWithValue("@sin_limite_stock", sinLimiteStock ? 1 : 0);
+        cmd.Parameters.AddWithValue("@id", productoId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    long presId = 0;
+    await using (var buscarPres = new MySqlCommand("SELECT id FROM presentaciones WHERE producto_id = @producto_id AND estado = 'ACTIVO' LIMIT 1;", con))
+    {
+        buscarPres.Parameters.AddWithValue("@producto_id", productoId);
+        object? foundPres = await buscarPres.ExecuteScalarAsync();
+        if (foundPres != null) presId = Convert.ToInt64(foundPres);
+    }
+
+    if (presId <= 0)
+    {
+        await using var cmd = new MySqlCommand("""
+            INSERT INTO presentaciones (producto_id, nombre, cantidad_base, precio_venta, estado)
+            VALUES (@producto_id, 'Unidad', 1, @precio_venta, 'ACTIVO');
+        """, con);
+        cmd.Parameters.AddWithValue("@producto_id", productoId);
+        cmd.Parameters.AddWithValue("@precio_venta", precio);
+        await cmd.ExecuteNonQueryAsync();
+    }
+    else
+    {
+        await using var cmd = new MySqlCommand("""
+            UPDATE presentaciones
+            SET nombre = 'Unidad',
+                cantidad_base = 1,
+                precio_venta = @precio_venta,
+                estado = 'ACTIVO'
+            WHERE id = @id;
+        """, con);
+        cmd.Parameters.AddWithValue("@precio_venta", precio);
+        cmd.Parameters.AddWithValue("@id", presId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    return existed;
+}
+
+static async Task<bool> UpsertCatalogoProductoLocal(MySqlConnection con, int sucursalId, string nombre, string categoria, decimal precio, string presentacion, int minimo)
 {
     long productoId = 0;
 
@@ -1757,15 +2038,13 @@ static async Task<bool> UpsertCatalogoProductoLocal(MySqlConnection con, int suc
             INSERT INTO productos
                 (sucursal_id, nombre, categoria, unidad_base, stock_actual, stock_minimo, estado, genera_comision, tipo_comision, valor_comision)
             VALUES
-                (@sucursal_id, @nombre, @categoria, @unidad_base, @stock_actual, @minimo, 'ACTIVO', @genera_comision, @tipo_comision, @valor_comision);
+                (@sucursal_id, @nombre, @categoria, 'UNIDAD', 0, @minimo, 'ACTIVO', @genera_comision, @tipo_comision, @valor_comision);
             SELECT LAST_INSERT_ID();
         """, con);
         cmd.Parameters.AddWithValue("@sucursal_id", sucursalId);
         cmd.Parameters.AddWithValue("@nombre", nombre);
         cmd.Parameters.AddWithValue("@categoria", categoria);
         cmd.Parameters.AddWithValue("@minimo", minimo);
-        cmd.Parameters.AddWithValue("@unidad_base", sinStock ? "SIN LÍMITE" : "UNIDAD");
-        cmd.Parameters.AddWithValue("@stock_actual", stockActual);
         cmd.Parameters.AddWithValue("@genera_comision", EsProductoConComision(nombre));
         cmd.Parameters.AddWithValue("@tipo_comision", EsProductoConComision(nombre) ? "PORCENTAJE" : "NINGUNA");
         cmd.Parameters.AddWithValue("@valor_comision", EsProductoConComision(nombre) ? 10 : 0);
@@ -1776,8 +2055,7 @@ static async Task<bool> UpsertCatalogoProductoLocal(MySqlConnection con, int suc
         await using var cmd = new MySqlCommand("""
             UPDATE productos
             SET categoria = @categoria,
-                unidad_base = @unidad_base,
-                stock_actual = @stock_actual,
+                unidad_base = 'UNIDAD',
                 stock_minimo = @minimo,
                 estado = 'ACTIVO',
                 genera_comision = @genera_comision,
@@ -1787,8 +2065,6 @@ static async Task<bool> UpsertCatalogoProductoLocal(MySqlConnection con, int suc
         """, con);
         cmd.Parameters.AddWithValue("@categoria", categoria);
         cmd.Parameters.AddWithValue("@minimo", minimo);
-        cmd.Parameters.AddWithValue("@unidad_base", sinStock ? "SIN LÍMITE" : "UNIDAD");
-        cmd.Parameters.AddWithValue("@stock_actual", stockActual);
         cmd.Parameters.AddWithValue("@genera_comision", EsProductoConComision(nombre));
         cmd.Parameters.AddWithValue("@tipo_comision", EsProductoConComision(nombre) ? "PORCENTAJE" : "NINGUNA");
         cmd.Parameters.AddWithValue("@valor_comision", EsProductoConComision(nombre) ? 10 : 0);
@@ -1958,6 +2234,11 @@ static async Task EnsureAppMeseraTables(MySqlConnection con)
     await using (var alter3 = new MySqlCommand("ALTER TABLE productos ADD COLUMN valor_comision DECIMAL(10,2) NOT NULL DEFAULT 0;", con))
     {
         try { await alter3.ExecuteNonQueryAsync(); } catch { }
+    }
+
+    await using (var alter4 = new MySqlCommand("ALTER TABLE productos ADD COLUMN sin_limite_stock TINYINT(1) NOT NULL DEFAULT 0;", con))
+    {
+        try { await alter4.ExecuteNonQueryAsync(); } catch { }
     }
 
     await using (var cmd = new MySqlCommand("""

@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Security.Cryptography;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Services;
@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V36_CORTESIA_COBRADA",
+            version = "V37_TARIFA_MESAS",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -893,7 +893,7 @@ app.MapGet("/api/app-mesera/test", async (Db db, int sucursalId) =>
     return Results.Ok(new
     {
         ok = true,
-        version = "V36_CORTESIA_COBRADA",
+        version = "V37_TARIFA_MESAS",
         sucursalId,
         productos,
         presentaciones,
@@ -1301,9 +1301,52 @@ app.MapGet("/api/sucursales", async (Db db) =>
     return Results.Ok(rows);
 });
 
+app.MapGet("/api/config/tarifa-mesas", async (Db db) =>
+{
+    await using var con = await db.OpenAsync();
+    decimal precioHora = await EnsureGlobalTableRateAsync(con);
+    return Results.Ok(new { ok = true, precioHora });
+});
+
+app.MapPost("/api/admin/tarifa-mesas", async (Db db, string clave, TableRateRequest req) =>
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+    if (req.PrecioHora <= 0)
+        return Results.BadRequest(new { ok = false, message = "La tarifa por hora debe ser mayor a 0." });
+
+    decimal precioHora = Math.Round(req.PrecioHora, 2);
+    await using var con = await db.OpenAsync();
+    await EnsureGlobalTableRateAsync(con);
+
+    await using (var cmd = new MySqlCommand("""
+        INSERT INTO configuracion_sistema (clave, valor_decimal, actualizado)
+        VALUES ('TARIFA_MESA_HORA', @precio, NOW())
+        ON DUPLICATE KEY UPDATE valor_decimal = VALUES(valor_decimal), actualizado = NOW();
+    """, con))
+    {
+        cmd.Parameters.AddWithValue("@precio", precioHora);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    await using (var cmd = new MySqlCommand("UPDATE mesas SET precio_hora = @precio;", con))
+    {
+        cmd.Parameters.AddWithValue("@precio", precioHora);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    return Results.Ok(new
+    {
+        ok = true,
+        precioHora,
+        message = "Tarifa única actualizada para todas las mesas."
+    });
+});
+
 app.MapGet("/api/mesas", async (Db db, int? sucursalId) =>
 {
     await using var con = await db.OpenAsync();
+    await EnsureGlobalTableRateAsync(con);
 
     const string sql = """
         SELECT m.id, m.sucursal_id, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, m.nombre, m.precio_hora, m.estado
@@ -1853,6 +1896,14 @@ app.MapPost("/api/cobros-mesa", async (Db db, SheetsReporter sheets, CobroMesaRe
         await create.ExecuteNonQueryAsync();
     }
 
+    // V37: el detalle de tiempo ahora incluye modalidad, tiempo real, horas cobradas y tarifa.
+    try
+    {
+        await using var widen = new MySqlCommand("ALTER TABLE cobros_mesa MODIFY COLUMN tiempo VARCHAR(220) NULL;", con);
+        await widen.ExecuteNonQueryAsync();
+    }
+    catch { }
+
     string syncKey = string.IsNullOrWhiteSpace(c.SyncKey) ? Guid.NewGuid().ToString("N") : c.SyncKey;
 
     const string sql = """
@@ -1921,6 +1972,13 @@ app.MapGet("/api/cobros-mesa", async (Db db, int? sucursalId) =>
         await create.ExecuteNonQueryAsync();
     }
 
+    try
+    {
+        await using var widen = new MySqlCommand("ALTER TABLE cobros_mesa MODIFY COLUMN tiempo VARCHAR(220) NULL;", con);
+        await widen.ExecuteNonQueryAsync();
+    }
+    catch { }
+
     string where = sucursalId.HasValue ? "WHERE c.sucursal_id = @sucursal_id" : "";
 
     string sql = $"""
@@ -1954,9 +2012,9 @@ app.MapPost("/api/mesas/estado", async (Db db, SheetsReporter sheets, MesaEstado
 
     const string sql = """
         INSERT INTO mesa_estados
-        (sucursal_id, mesa_id, mesa, estado, cajero, inicio, fin_programado, minutos, total_mesa, total_consumo, total_general, cliente_reserva, actualizado, sync_key)
+        (sucursal_id, mesa_id, mesa, estado, cajero, inicio, fin_programado, minutos, tarifa_hora, total_mesa, total_consumo, total_general, cliente_reserva, actualizado, sync_key)
         VALUES
-        (@sucursal_id, @mesa_id, @mesa, @estado, @cajero, @inicio, @fin_programado, @minutos, @total_mesa, @total_consumo, @total_general, @cliente_reserva, NOW(), @sync_key)
+        (@sucursal_id, @mesa_id, @mesa, @estado, @cajero, @inicio, @fin_programado, @minutos, @tarifa_hora, @total_mesa, @total_consumo, @total_general, @cliente_reserva, NOW(), @sync_key)
         ON DUPLICATE KEY UPDATE
             mesa = VALUES(mesa),
             estado = VALUES(estado),
@@ -1964,6 +2022,7 @@ app.MapPost("/api/mesas/estado", async (Db db, SheetsReporter sheets, MesaEstado
             inicio = VALUES(inicio),
             fin_programado = VALUES(fin_programado),
             minutos = VALUES(minutos),
+            tarifa_hora = VALUES(tarifa_hora),
             total_mesa = VALUES(total_mesa),
             total_consumo = VALUES(total_consumo),
             total_general = VALUES(total_general),
@@ -1980,6 +2039,8 @@ app.MapPost("/api/mesas/estado", async (Db db, SheetsReporter sheets, MesaEstado
     cmd.Parameters.AddWithValue("@inicio", m.Inicio.HasValue ? m.Inicio.Value : DBNull.Value);
     cmd.Parameters.AddWithValue("@fin_programado", m.FinProgramado.HasValue ? m.FinProgramado.Value : DBNull.Value);
     cmd.Parameters.AddWithValue("@minutos", m.Minutos);
+    decimal tarifaVigente = m.TarifaHora > 0 ? m.TarifaHora : await EnsureGlobalTableRateAsync(con);
+    cmd.Parameters.AddWithValue("@tarifa_hora", tarifaVigente);
     cmd.Parameters.AddWithValue("@total_mesa", m.TotalMesa);
     cmd.Parameters.AddWithValue("@total_consumo", m.TotalConsumo);
     cmd.Parameters.AddWithValue("@total_general", m.TotalGeneral);
@@ -2026,7 +2087,7 @@ app.MapGet("/api/mesas/estado", async (Db db, int? sucursalId) =>
         SELECT e.sucursal_id,
                CASE WHEN e.sucursal_id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
                e.mesa_id, e.mesa, e.estado, e.cajero, e.inicio, e.fin_programado,
-               e.minutos, e.total_mesa, e.total_consumo, e.total_general,
+               e.minutos, e.tarifa_hora, e.total_mesa, e.total_consumo, e.total_general,
                e.cliente_reserva, e.actualizado
         FROM mesa_estados e
         {where}
@@ -2416,7 +2477,7 @@ static async Task<IResult> AplicarStockTxtPaquetesV33(Db db, SheetsReporter shee
     return Results.Ok(new
     {
         ok = true,
-        version = "V36_CORTESIA_COBRADA",
+        version = "V37_TARIFA_MESAS",
         message = "Stock calculado desde el TXT como cantidad de paquetes/entradas por unidades_por_entrada.",
         formula = "stock_actual = cantidad_TXT × unidades_por_entrada",
         sucursalId,
@@ -2488,7 +2549,7 @@ static async Task<IResult> AplicarStockInicialReferenciaV32(Db db, SheetsReporte
     return Results.Ok(new
     {
         ok = true,
-        version = "V36_CORTESIA_COBRADA",
+        version = "V37_TARIFA_MESAS",
         message = "Stock inicial cargado con las cantidades visibles en las capturas del inventario.",
         sucursalId,
         productosActualizados,
@@ -3241,6 +3302,54 @@ static string NormalizarCategoriaProducto(string? categoria, string? nombre)
     return "Otros";
 }
 
+static async Task<decimal> EnsureGlobalTableRateAsync(MySqlConnection con)
+{
+    await using (var create = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS configuracion_sistema (
+            clave VARCHAR(100) PRIMARY KEY,
+            valor_decimal DECIMAL(12,2) NULL,
+            actualizado DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    """, con))
+    {
+        await create.ExecuteNonQueryAsync();
+    }
+
+    await using (var seed = new MySqlCommand("""
+        INSERT IGNORE INTO configuracion_sistema (clave, valor_decimal, actualizado)
+        VALUES ('TARIFA_MESA_HORA', 30.00, NOW());
+    """, con))
+    {
+        await seed.ExecuteNonQueryAsync();
+    }
+
+    decimal precioHora = 30m;
+    await using (var get = new MySqlCommand("SELECT valor_decimal FROM configuracion_sistema WHERE clave='TARIFA_MESA_HORA' LIMIT 1;", con))
+    {
+        object? value = await get.ExecuteScalarAsync();
+        if (value != null && value != DBNull.Value)
+        {
+            try { precioHora = Convert.ToDecimal(value); } catch { precioHora = 30m; }
+        }
+    }
+
+    if (precioHora <= 0)
+    {
+        precioHora = 30m;
+        await using var fix = new MySqlCommand("UPDATE configuracion_sistema SET valor_decimal=30.00, actualizado=NOW() WHERE clave='TARIFA_MESA_HORA';", con);
+        await fix.ExecuteNonQueryAsync();
+    }
+
+    // Una sola tarifa aplica a todas las mesas de todas las sucursales.
+    await using (var sync = new MySqlCommand("UPDATE mesas SET precio_hora=@precio WHERE precio_hora <> @precio OR precio_hora IS NULL;", con))
+    {
+        sync.Parameters.AddWithValue("@precio", precioHora);
+        await sync.ExecuteNonQueryAsync();
+    }
+
+    return Math.Round(precioHora, 2);
+}
+
 static async Task EnsureAppMeseraTables(MySqlConnection con)
 {
     await using (var alter1 = new MySqlCommand("ALTER TABLE productos ADD COLUMN genera_comision TINYINT(1) NOT NULL DEFAULT 0;", con))
@@ -3463,6 +3572,7 @@ static async Task EnsureMesasEnVivoTables(MySqlConnection con)
             inicio DATETIME NULL,
             fin_programado DATETIME NULL,
             minutos INT NOT NULL DEFAULT 0,
+            tarifa_hora DECIMAL(10,2) NOT NULL DEFAULT 30.00,
             total_mesa DECIMAL(10,2) NOT NULL DEFAULT 0,
             total_consumo DECIMAL(10,2) NOT NULL DEFAULT 0,
             total_general DECIMAL(10,2) NOT NULL DEFAULT 0,
@@ -3474,6 +3584,11 @@ static async Task EnsureMesasEnVivoTables(MySqlConnection con)
     """, con))
     {
         await cmd.ExecuteNonQueryAsync();
+    }
+
+    await using (var alterRate = new MySqlCommand("ALTER TABLE mesa_estados ADD COLUMN tarifa_hora DECIMAL(10,2) NOT NULL DEFAULT 30.00 AFTER minutos;", con))
+    {
+        try { await alterRate.ExecuteNonQueryAsync(); } catch { }
     }
 
     await using (var cmd = new MySqlCommand("""
@@ -4098,6 +4213,8 @@ public sealed class SheetsReporter
 }
 
 
+public record TableRateRequest(decimal PrecioHora);
+
 public record MesaConsumoVivoRequest(
     string? Producto,
     string? Presentacion,
@@ -4115,6 +4232,7 @@ public record MesaEstadoRequest(
     DateTime? Inicio,
     DateTime? FinProgramado,
     int Minutos,
+    decimal TarifaHora,
     decimal TotalMesa,
     decimal TotalConsumo,
     decimal TotalGeneral,

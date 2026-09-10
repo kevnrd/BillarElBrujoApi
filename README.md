@@ -1,19 +1,22 @@
-# BillarElBrujoApi V24 - Fix Railway Build Turnos
+# BillarElBrujoApi V35 - Arqueo de caja / cierre remoto
 
-Versión para recuperar deploy en Railway con usuarios, contraseñas cifradas y turnos.
+API ASP.NET Core para BILLAR EL BRUJO, Railway + MySQL + Google Sheets.
 
-# BillarElBrujoApi V7
+## Versión esperada
+Abrir `/health` y verificar:
+`V35_ARQUEO_CIERRE_ADMIN`
 
-API ASP.NET Core para Railway + MySQL + Google Sheets.
+## Nuevo en V35
+- `POST /api/cierres-turno`: recibe un arqueo completo al cerrar caja.
+- `GET /api/admin/cierres-turno?clave=ENTREGAR_LIMPIO_2026`: permite al Administrador recuperar cierres desde otra PC.
+- Tabla `cierres_turno` con resumen + `detalle_json` multipágina.
+- `sync_key` único para impedir duplicados y proteger cierres ya realizados.
 
-## Rutas principales
-
-- `/health`
-- `/api/sheets/status`
-- `/api/sheets/sync`
+## Compatibilidad
+- Escritorio: V90.
+- App Mesera: V12 (no requiere cambios para este módulo).
 
 ## Variables Railway necesarias
-
 MySQL:
 - MYSQL_URL
 - MYSQLHOST
@@ -26,12 +29,4 @@ Google Sheets:
 - GOOGLE_SHEET_ID
 - GOOGLE_CREDENTIALS_JSON
 
-No subir credenciales a GitHub.
-
-
-## V6
-Corrige el error MySQL ONLY_FULL_GROUP_BY en `/api/sheets/sync`.
-
-
-## V7
-`/health` muestra `version: V7_GOOGLE_SHEETS_FIX_SIMPLE` para confirmar que Railway usa el código nuevo.
+No subir credenciales privadas a GitHub.

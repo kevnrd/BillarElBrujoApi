@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V32_STOCK_CORREGIDO",
+            version = "V35_ARQUEO_CIERRE_ADMIN",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -117,7 +117,8 @@ app.MapPost("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, s
         "detalle_pedidos_movil",
         "pedidos_movil",
         "comisiones_meseras",
-        "reportes_productos_movil"
+        "reportes_productos_movil",
+        "cierres_turno"
     };
 
     List<string> cleaned = new();
@@ -188,7 +189,8 @@ app.MapGet("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, st
         "detalle_pedidos_movil",
         "pedidos_movil",
         "comisiones_meseras",
-        "reportes_productos_movil"
+        "reportes_productos_movil",
+        "cierres_turno"
     };
 
     List<string> cleaned = new();
@@ -891,7 +893,7 @@ app.MapGet("/api/app-mesera/test", async (Db db, int sucursalId) =>
     return Results.Ok(new
     {
         ok = true,
-        version = "V32_STOCK_CORREGIDO",
+        version = "V34_CORTESIA_MESERA",
         sucursalId,
         productos,
         presentaciones,
@@ -905,7 +907,28 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
     await using var con = await db.OpenAsync();
     await EnsureAppMeseraTables(con);
 
-    decimal subtotal = req.Cantidad * req.PrecioUnitario;
+    bool esCortesia = req.MesaId <= 0 && (req.Mesa ?? "").Contains("CORTES", StringComparison.OrdinalIgnoreCase);
+
+    if (req.Cantidad <= 0)
+        return Results.BadRequest(new { ok = false, message = "Cantidad inválida." });
+
+    if (esCortesia)
+    {
+        await using var validar = new MySqlCommand("SELECT categoria FROM productos WHERE id = @id AND sucursal_id = @sucursal_id AND estado = 'ACTIVO' LIMIT 1;", con);
+        validar.Parameters.AddWithValue("@id", req.ProductoId);
+        validar.Parameters.AddWithValue("@sucursal_id", req.SucursalId);
+        string categoria = Convert.ToString(await validar.ExecuteScalarAsync()) ?? "";
+        string cat = categoria.Trim().ToUpperInvariant();
+        bool permitido = cat.Contains("TRAGO") || cat.Contains("BOTELLA") || cat.Contains("SERVIDOS EN VASO");
+        if (!permitido)
+            return Results.BadRequest(new { ok = false, message = "La cortesía solo permite tragos en vaso o botella." });
+    }
+
+    decimal precioAplicado = esCortesia ? 0M : req.PrecioUnitario;
+    decimal subtotal = req.Cantidad * precioAplicado;
+    bool generaComisionAplicada = esCortesia || req.GeneraComision;
+    string tipoComisionAplicada = esCortesia ? "MONTO" : (req.TipoComision ?? "NINGUNA");
+    decimal valorComisionAplicada = esCortesia ? 5M : req.ValorComision;
     string syncKey = string.IsNullOrWhiteSpace(req.SyncKey) ? Guid.NewGuid().ToString("N") : req.SyncKey;
 
     await using var tx = await con.BeginTransactionAsync();
@@ -950,10 +973,10 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
                  @genera_comision, @tipo_comision, @valor_comision, @comision_calculada);
         """;
 
-        decimal comision = req.GeneraComision
-            ? (req.TipoComision.Equals("PORCENTAJE", StringComparison.OrdinalIgnoreCase)
-                ? subtotal * (req.ValorComision / 100M)
-                : req.ValorComision * req.Cantidad)
+        decimal comision = generaComisionAplicada
+            ? (tipoComisionAplicada.Equals("PORCENTAJE", StringComparison.OrdinalIgnoreCase)
+                ? subtotal * (valorComisionAplicada / 100M)
+                : valorComisionAplicada * req.Cantidad)
             : 0M;
 
         await using var detCmd = new MySqlCommand(detSql, con, tx);
@@ -963,11 +986,11 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
         detCmd.Parameters.AddWithValue("@producto", req.Producto);
         detCmd.Parameters.AddWithValue("@presentacion", req.Presentacion);
         detCmd.Parameters.AddWithValue("@cantidad", req.Cantidad);
-        detCmd.Parameters.AddWithValue("@precio_unitario", req.PrecioUnitario);
+        detCmd.Parameters.AddWithValue("@precio_unitario", precioAplicado);
         detCmd.Parameters.AddWithValue("@subtotal", subtotal);
-        detCmd.Parameters.AddWithValue("@genera_comision", req.GeneraComision);
-        detCmd.Parameters.AddWithValue("@tipo_comision", req.TipoComision ?? "NINGUNA");
-        detCmd.Parameters.AddWithValue("@valor_comision", req.ValorComision);
+        detCmd.Parameters.AddWithValue("@genera_comision", generaComisionAplicada);
+        detCmd.Parameters.AddWithValue("@tipo_comision", tipoComisionAplicada);
+        detCmd.Parameters.AddWithValue("@valor_comision", valorComisionAplicada);
         detCmd.Parameters.AddWithValue("@comision_calculada", comision);
         await detCmd.ExecuteNonQueryAsync();
 
@@ -980,7 +1003,7 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
             estado = "PENDIENTE",
             total = subtotal,
             comision_calculada = comision,
-            message = "Pedido enviado a caja."
+            message = esCortesia ? "Cortesía enviada a caja." : "Pedido enviado a caja."
         });
     }
     catch (Exception ex)
@@ -1381,151 +1404,22 @@ app.MapGet("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter shee
 
 app.MapPost("/api/admin/aplicar-stock-inicial", async (Db db, SheetsReporter sheets, string clave, int sucursalId = 1) =>
 {
-    return await AplicarStockInicialReferenciaV32(db, sheets, clave, sucursalId);
+    return await AplicarStockTxtPaquetesV33(db, sheets, clave, sucursalId);
 });
 
 app.MapGet("/api/admin/aplicar-stock-inicial", async (Db db, SheetsReporter sheets, string clave, int sucursalId = 1) =>
 {
-    return await AplicarStockInicialReferenciaV32(db, sheets, clave, sucursalId);
+    return await AplicarStockTxtPaquetesV33(db, sheets, clave, sucursalId);
 });
-
 
 app.MapPost("/api/admin/aplicar-stock-txt", async (Db db, SheetsReporter sheets, string clave, int sucursalId = 1) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
-    if (clave != cleanKey) return Results.Unauthorized();
-    if (sucursalId != 1 && sucursalId != 2)
-        return Results.BadRequest(new { ok = false, message = "sucursalId debe ser 1 o 2." });
-
-    await using var con = await db.OpenAsync();
-    await EnsureAppMeseraTables(con);
-
-    int productosActualizados = 0;
-    var faltantes = new List<string>();
-
-    foreach (var item in StockSoloTxtV30())
-    {
-        long productoId = 0;
-
-        foreach (string alias in item.aliases)
-        {
-            await using var buscar = new MySqlCommand("""
-                SELECT id
-                FROM productos
-                WHERE sucursal_id = @sucursal_id
-                  AND UPPER(TRIM(nombre)) = UPPER(TRIM(@nombre))
-                  AND estado = 'ACTIVO'
-                LIMIT 1;
-            """, con);
-            buscar.Parameters.AddWithValue("@sucursal_id", sucursalId);
-            buscar.Parameters.AddWithValue("@nombre", alias);
-
-            var found = await buscar.ExecuteScalarAsync();
-            if (found != null)
-            {
-                productoId = Convert.ToInt64(found);
-                break;
-            }
-        }
-
-        if (productoId <= 0)
-        {
-            faltantes.Add(item.aliases[0]);
-            continue;
-        }
-
-        await using var actualizar = new MySqlCommand("""
-            UPDATE productos
-            SET stock_actual = @stock_actual
-            WHERE id = @id;
-        """, con);
-        actualizar.Parameters.AddWithValue("@stock_actual", item.cantidad);
-        actualizar.Parameters.AddWithValue("@id", productoId);
-        await actualizar.ExecuteNonQueryAsync();
-        productosActualizados++;
-    }
-
-    await TrySyncSheets(db, sheets);
-
-    return Results.Ok(new
-    {
-        ok = true,
-        version = "V32_STOCK_CORREGIDO",
-        message = "Stock actualizado únicamente con las cantidades del TXT. No se modificaron precios, categorías ni presentaciones.",
-        criterio = "Las cantidades se copiaron tal cual están en el TXT y se interpretan como cantidad de paquetes.",
-        sucursalId,
-        productosActualizados,
-        faltantes
-    });
+    return await AplicarStockTxtPaquetesV33(db, sheets, clave, sucursalId);
 });
 
 app.MapGet("/api/admin/aplicar-stock-txt", async (Db db, SheetsReporter sheets, string clave, int sucursalId = 1) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
-    if (clave != cleanKey) return Results.Unauthorized();
-    if (sucursalId != 1 && sucursalId != 2)
-        return Results.BadRequest(new { ok = false, message = "sucursalId debe ser 1 o 2." });
-
-    await using var con = await db.OpenAsync();
-    await EnsureAppMeseraTables(con);
-
-    int productosActualizados = 0;
-    var faltantes = new List<string>();
-
-    foreach (var item in StockSoloTxtV30())
-    {
-        long productoId = 0;
-
-        foreach (string alias in item.aliases)
-        {
-            await using var buscar = new MySqlCommand("""
-                SELECT id
-                FROM productos
-                WHERE sucursal_id = @sucursal_id
-                  AND UPPER(TRIM(nombre)) = UPPER(TRIM(@nombre))
-                  AND estado = 'ACTIVO'
-                LIMIT 1;
-            """, con);
-            buscar.Parameters.AddWithValue("@sucursal_id", sucursalId);
-            buscar.Parameters.AddWithValue("@nombre", alias);
-
-            var found = await buscar.ExecuteScalarAsync();
-            if (found != null)
-            {
-                productoId = Convert.ToInt64(found);
-                break;
-            }
-        }
-
-        if (productoId <= 0)
-        {
-            faltantes.Add(item.aliases[0]);
-            continue;
-        }
-
-        await using var actualizar = new MySqlCommand("""
-            UPDATE productos
-            SET stock_actual = @stock_actual
-            WHERE id = @id;
-        """, con);
-        actualizar.Parameters.AddWithValue("@stock_actual", item.cantidad);
-        actualizar.Parameters.AddWithValue("@id", productoId);
-        await actualizar.ExecuteNonQueryAsync();
-        productosActualizados++;
-    }
-
-    await TrySyncSheets(db, sheets);
-
-    return Results.Ok(new
-    {
-        ok = true,
-        version = "V32_STOCK_CORREGIDO",
-        message = "Stock actualizado únicamente con las cantidades del TXT. No se modificaron precios, categorías ni presentaciones.",
-        criterio = "Las cantidades se copiaron tal cual están en el TXT y se interpretan como cantidad de paquetes.",
-        sucursalId,
-        productosActualizados,
-        faltantes
-    });
+    return await AplicarStockTxtPaquetesV33(db, sheets, clave, sucursalId);
 });
 
 app.MapPost("/api/productos", async (Db db, SheetsReporter sheets, string clave, ProductoRequest p) =>
@@ -2130,6 +2024,162 @@ app.MapPost("/api/propinas", async (Db db, SheetsReporter sheets, PropinaRequest
     return Results.Ok(new { ok = true, syncKey });
 });
 
+
+// V35: cierre de turno/arqueo inmutable.
+// La caja envía una fotografía completa del turno; el Administrador la consulta después.
+app.MapPost("/api/cierres-turno", async (Db db, SheetsReporter sheets, ShiftCloseRequest r) =>
+{
+    await using var con = await db.OpenAsync();
+    await EnsureShiftCloseTables(con);
+
+    string syncKey = string.IsNullOrWhiteSpace(r.SyncKey)
+        ? "CIERRE-" + r.SucursalId + "-" + (r.CajeroUsuario ?? "") + "-" + r.Inicio.Ticks
+        : r.SyncKey.Trim();
+
+    const string sql = """
+        INSERT INTO cierres_turno
+        (
+            sucursal_id, sucursal, cajero_usuario, cajero_nombre, caja, turno,
+            inicio, fin, hora_entrada, fecha_cierre,
+            transacciones_total, transacciones_efectivo, transacciones_qr,
+            transacciones_tarjeta, transacciones_transferencia,
+            efectivo, qr, tarjeta, transferencia, sin_metodo,
+            productos_total, mesas_total, minutos_jugados, propinas_total,
+            cortesias_valor, comisiones_total, gastos_total, perdidas_total,
+            total_generado, neto_turno, observaciones, detalle_json, sync_key
+        )
+        VALUES
+        (
+            @sucursal_id, @sucursal, @cajero_usuario, @cajero_nombre, @caja, @turno,
+            @inicio, @fin, @hora_entrada, @fecha_cierre,
+            @transacciones_total, @transacciones_efectivo, @transacciones_qr,
+            @transacciones_tarjeta, @transacciones_transferencia,
+            @efectivo, @qr, @tarjeta, @transferencia, @sin_metodo,
+            @productos_total, @mesas_total, @minutos_jugados, @propinas_total,
+            @cortesias_valor, @comisiones_total, @gastos_total, @perdidas_total,
+            @total_generado, @neto_turno, @observaciones, @detalle_json, @sync_key
+        )
+        ON DUPLICATE KEY UPDATE sync_key = VALUES(sync_key);
+    """;
+
+    await using (var cmd = new MySqlCommand(sql, con))
+    {
+        cmd.Parameters.AddWithValue("@sucursal_id", r.SucursalId);
+        cmd.Parameters.AddWithValue("@sucursal", string.IsNullOrWhiteSpace(r.Sucursal) ? (r.SucursalId == 2 ? "SEGUNDA SUCURSAL" : "PRIMERA SUCURSAL") : r.Sucursal.Trim());
+        cmd.Parameters.AddWithValue("@cajero_usuario", r.CajeroUsuario ?? "");
+        cmd.Parameters.AddWithValue("@cajero_nombre", r.CajeroNombre ?? "");
+        cmd.Parameters.AddWithValue("@caja", r.Caja ?? "");
+        cmd.Parameters.AddWithValue("@turno", NormalizarTurno(r.Turno));
+        cmd.Parameters.AddWithValue("@inicio", r.Inicio);
+        cmd.Parameters.AddWithValue("@fin", r.Fin);
+        cmd.Parameters.AddWithValue("@hora_entrada", r.HoraEntrada == DateTime.MinValue ? r.Inicio : r.HoraEntrada);
+        cmd.Parameters.AddWithValue("@fecha_cierre", r.FechaCierre);
+        cmd.Parameters.AddWithValue("@transacciones_total", Math.Max(0, r.TransaccionesTotal));
+        cmd.Parameters.AddWithValue("@transacciones_efectivo", Math.Max(0, r.TransaccionesEfectivo));
+        cmd.Parameters.AddWithValue("@transacciones_qr", Math.Max(0, r.TransaccionesQr));
+        cmd.Parameters.AddWithValue("@transacciones_tarjeta", Math.Max(0, r.TransaccionesTarjeta));
+        cmd.Parameters.AddWithValue("@transacciones_transferencia", Math.Max(0, r.TransaccionesTransferencia));
+        cmd.Parameters.AddWithValue("@efectivo", Math.Max(0, r.Efectivo));
+        cmd.Parameters.AddWithValue("@qr", Math.Max(0, r.Qr));
+        cmd.Parameters.AddWithValue("@tarjeta", Math.Max(0, r.Tarjeta));
+        cmd.Parameters.AddWithValue("@transferencia", Math.Max(0, r.Transferencia));
+        cmd.Parameters.AddWithValue("@sin_metodo", Math.Max(0, r.SinMetodo));
+        cmd.Parameters.AddWithValue("@productos_total", Math.Max(0, r.ProductosTotal));
+        cmd.Parameters.AddWithValue("@mesas_total", Math.Max(0, r.MesasTotal));
+        cmd.Parameters.AddWithValue("@minutos_jugados", Math.Max(0, r.MinutosJugados));
+        cmd.Parameters.AddWithValue("@propinas_total", Math.Max(0, r.PropinasTotal));
+        cmd.Parameters.AddWithValue("@cortesias_valor", Math.Max(0, r.CortesiasValor));
+        cmd.Parameters.AddWithValue("@comisiones_total", Math.Max(0, r.ComisionesTotal));
+        cmd.Parameters.AddWithValue("@gastos_total", Math.Max(0, r.GastosTotal));
+        cmd.Parameters.AddWithValue("@perdidas_total", Math.Max(0, r.PerdidasTotal));
+        cmd.Parameters.AddWithValue("@total_generado", Math.Max(0, r.TotalGenerado));
+        cmd.Parameters.AddWithValue("@neto_turno", r.NetoTurno);
+        cmd.Parameters.AddWithValue("@observaciones", r.Observaciones ?? "");
+        cmd.Parameters.AddWithValue("@detalle_json", string.IsNullOrWhiteSpace(r.DetalleJson) ? "[]" : r.DetalleJson);
+        cmd.Parameters.AddWithValue("@sync_key", syncKey);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    long id;
+    await using (var idCmd = new MySqlCommand("SELECT id FROM cierres_turno WHERE sync_key=@sync_key LIMIT 1;", con))
+    {
+        idCmd.Parameters.AddWithValue("@sync_key", syncKey);
+        id = Convert.ToInt64(await idCmd.ExecuteScalarAsync() ?? 0L);
+    }
+
+    await TrySyncSheets(db, sheets);
+    return Results.Ok(new { ok = true, id, syncKey, message = "Arqueo guardado para Administración." });
+});
+
+app.MapGet("/api/admin/cierres-turno", async (Db db, string clave, int? sucursalId) =>
+{
+    const string adminKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != adminKey) return Results.Unauthorized();
+
+    await using var con = await db.OpenAsync();
+    await EnsureShiftCloseTables(con);
+
+    string sql = """
+        SELECT
+            id,
+            sync_key,
+            sucursal_id,
+            sucursal,
+            cajero_usuario,
+            cajero_nombre,
+            caja,
+            turno,
+            inicio,
+            fin,
+            hora_entrada,
+            fecha_cierre,
+            transacciones_total,
+            transacciones_efectivo,
+            transacciones_qr,
+            transacciones_tarjeta,
+            transacciones_transferencia,
+            efectivo,
+            qr,
+            tarjeta,
+            transferencia,
+            sin_metodo,
+            productos_total,
+            mesas_total,
+            minutos_jugados,
+            propinas_total,
+            cortesias_valor,
+            comisiones_total,
+            gastos_total,
+            perdidas_total,
+            total_generado,
+            neto_turno,
+            observaciones,
+            detalle_json
+        FROM cierres_turno
+    """;
+
+    if (sucursalId.HasValue && sucursalId.Value > 0)
+        sql += " WHERE sucursal_id = @sucursal_id";
+
+    sql += " ORDER BY fecha_cierre DESC, id DESC;";
+
+    await using var cmd = new MySqlCommand(sql, con);
+    if (sucursalId.HasValue && sucursalId.Value > 0)
+        cmd.Parameters.AddWithValue("@sucursal_id", sucursalId.Value);
+
+    List<Dictionary<string, object?>> rows = new();
+    await using var rd = await cmd.ExecuteReaderAsync();
+    while (await rd.ReadAsync())
+    {
+        Dictionary<string, object?> row = new(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < rd.FieldCount; i++)
+            row[rd.GetName(i)] = rd.IsDBNull(i) ? null : rd.GetValue(i);
+        rows.Add(row);
+    }
+
+    return Results.Ok(rows);
+});
+
 app.MapGet("/api/reportes/resumen", async (Db db) =>
 {
     await using var con = await db.OpenAsync();
@@ -2176,6 +2226,102 @@ static async Task TrySyncSheets(Db db, SheetsReporter sheets)
     }
 }
 
+
+static async Task<IResult> AplicarStockTxtPaquetesV33(Db db, SheetsReporter sheets, string clave, int sucursalId)
+{
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    if (clave != cleanKey) return Results.Unauthorized();
+    if (sucursalId != 1 && sucursalId != 2)
+        return Results.BadRequest(new { ok = false, message = "sucursalId debe ser 1 o 2." });
+
+    await using var con = await db.OpenAsync();
+    await EnsureAppMeseraTables(con);
+
+    int productosActualizados = 0;
+    int productosSinLimite = 0;
+    var faltantes = new List<string>();
+    var revisarUnidades = new List<string>();
+
+    foreach (var item in StockSoloTxtV30())
+    {
+        long productoId = 0;
+        int unidadesPorEntrada = 1;
+        bool sinLimite = false;
+        string nombreEncontrado = item.aliases[0];
+
+        foreach (string alias in item.aliases)
+        {
+            await using var buscar = new MySqlCommand("""
+                SELECT id,
+                       GREATEST(COALESCE(unidades_por_entrada, 1), 1) AS unidades_por_entrada,
+                       COALESCE(sin_limite_stock, 0) AS sin_limite_stock,
+                       nombre
+                FROM productos
+                WHERE sucursal_id = @sucursal_id
+                  AND UPPER(TRIM(nombre)) = UPPER(TRIM(@nombre))
+                  AND estado = 'ACTIVO'
+                LIMIT 1;
+            """, con);
+            buscar.Parameters.AddWithValue("@sucursal_id", sucursalId);
+            buscar.Parameters.AddWithValue("@nombre", alias);
+
+            await using var reader = await buscar.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                productoId = reader.GetInt64("id");
+                unidadesPorEntrada = reader.GetInt32("unidades_por_entrada");
+                sinLimite = reader.GetInt32("sin_limite_stock") == 1;
+                nombreEncontrado = reader.GetString("nombre");
+                break;
+            }
+        }
+
+        if (productoId <= 0)
+        {
+            faltantes.Add(item.aliases[0]);
+            continue;
+        }
+
+        if (sinLimite)
+        {
+            productosSinLimite++;
+            continue;
+        }
+
+        if (unidadesPorEntrada == 1 && item.cantidad > 0)
+            revisarUnidades.Add(nombreEncontrado);
+
+        decimal stockTotal = Math.Max(0, item.cantidad * unidadesPorEntrada);
+
+        await using var actualizar = new MySqlCommand("""
+            UPDATE productos
+            SET stock_actual = @stock_actual,
+                tipo_entrada = CASE WHEN @unidades_por_entrada > 1 THEN 'PAQUETE' ELSE tipo_entrada END
+            WHERE id = @id;
+        """, con);
+        actualizar.Parameters.AddWithValue("@stock_actual", stockTotal);
+        actualizar.Parameters.AddWithValue("@unidades_por_entrada", unidadesPorEntrada);
+        actualizar.Parameters.AddWithValue("@id", productoId);
+        await actualizar.ExecuteNonQueryAsync();
+        productosActualizados++;
+    }
+
+    await TrySyncSheets(db, sheets);
+
+    return Results.Ok(new
+    {
+        ok = true,
+        version = "V34_CORTESIA_MESERA",
+        message = "Stock calculado desde el TXT como cantidad de paquetes/entradas por unidades_por_entrada.",
+        formula = "stock_actual = cantidad_TXT × unidades_por_entrada",
+        sucursalId,
+        productosActualizados,
+        productosSinLimite,
+        faltantes,
+        revisarUnidades,
+        nota = "Los productos con unidades_por_entrada = 1 se calculan 1 a 1. Si realmente llegan en paquetes de 6, 12, 24, etc., configure primero ese valor desde Productos / Stock."
+    });
+}
 
 static async Task<IResult> AplicarStockInicialReferenciaV32(Db db, SheetsReporter sheets, string clave, int sucursalId)
 {
@@ -2237,7 +2383,7 @@ static async Task<IResult> AplicarStockInicialReferenciaV32(Db db, SheetsReporte
     return Results.Ok(new
     {
         ok = true,
-        version = "V32_STOCK_CORREGIDO",
+        version = "V34_CORTESIA_MESERA",
         message = "Stock inicial cargado con las cantidades visibles en las capturas del inventario.",
         sucursalId,
         productosActualizados,
@@ -3151,6 +3297,54 @@ static async Task EnsureAppMeseraTables(MySqlConnection con)
     }
 }
 
+
+static async Task EnsureShiftCloseTables(MySqlConnection con)
+{
+    await using var cmd = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS cierres_turno (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            sucursal_id INT NOT NULL,
+            sucursal VARCHAR(120) NOT NULL,
+            cajero_usuario VARCHAR(100) NOT NULL,
+            cajero_nombre VARCHAR(150) NOT NULL,
+            caja VARCHAR(100) NULL,
+            turno VARCHAR(30) NOT NULL,
+            inicio DATETIME NOT NULL,
+            fin DATETIME NOT NULL,
+            hora_entrada DATETIME NOT NULL,
+            fecha_cierre DATETIME NOT NULL,
+            transacciones_total INT NOT NULL DEFAULT 0,
+            transacciones_efectivo INT NOT NULL DEFAULT 0,
+            transacciones_qr INT NOT NULL DEFAULT 0,
+            transacciones_tarjeta INT NOT NULL DEFAULT 0,
+            transacciones_transferencia INT NOT NULL DEFAULT 0,
+            efectivo DECIMAL(12,2) NOT NULL DEFAULT 0,
+            qr DECIMAL(12,2) NOT NULL DEFAULT 0,
+            tarjeta DECIMAL(12,2) NOT NULL DEFAULT 0,
+            transferencia DECIMAL(12,2) NOT NULL DEFAULT 0,
+            sin_metodo DECIMAL(12,2) NOT NULL DEFAULT 0,
+            productos_total DECIMAL(12,2) NOT NULL DEFAULT 0,
+            mesas_total DECIMAL(12,2) NOT NULL DEFAULT 0,
+            minutos_jugados INT NOT NULL DEFAULT 0,
+            propinas_total DECIMAL(12,2) NOT NULL DEFAULT 0,
+            cortesias_valor DECIMAL(12,2) NOT NULL DEFAULT 0,
+            comisiones_total DECIMAL(12,2) NOT NULL DEFAULT 0,
+            gastos_total DECIMAL(12,2) NOT NULL DEFAULT 0,
+            perdidas_total DECIMAL(12,2) NOT NULL DEFAULT 0,
+            total_generado DECIMAL(12,2) NOT NULL DEFAULT 0,
+            neto_turno DECIMAL(12,2) NOT NULL DEFAULT 0,
+            observaciones TEXT NULL,
+            detalle_json LONGTEXT NOT NULL,
+            sync_key VARCHAR(220) NOT NULL,
+            UNIQUE KEY uk_cierre_turno_sync (sync_key),
+            INDEX idx_cierre_turno_fecha (fecha_cierre),
+            INDEX idx_cierre_turno_sucursal (sucursal_id),
+            INDEX idx_cierre_turno_cajero (cajero_usuario)
+        );
+    """, con);
+    await cmd.ExecuteNonQueryAsync();
+}
+
 static async Task EnsureMesasEnVivoTables(MySqlConnection con)
 {
     await using (var cmd = new MySqlCommand("""
@@ -3873,6 +4067,43 @@ public sealed record AdminProductRequest(
     decimal ValorComision,
     string Estado,
     List<AdminProductPresentationRequest>? Presentaciones
+);
+
+
+public sealed record ShiftCloseRequest(
+    int SucursalId,
+    string? Sucursal,
+    string? CajeroUsuario,
+    string? CajeroNombre,
+    string? Caja,
+    string? Turno,
+    DateTime Inicio,
+    DateTime Fin,
+    DateTime HoraEntrada,
+    DateTime FechaCierre,
+    int TransaccionesTotal,
+    int TransaccionesEfectivo,
+    int TransaccionesQr,
+    int TransaccionesTarjeta,
+    int TransaccionesTransferencia,
+    decimal Efectivo,
+    decimal Qr,
+    decimal Tarjeta,
+    decimal Transferencia,
+    decimal SinMetodo,
+    decimal ProductosTotal,
+    decimal MesasTotal,
+    int MinutosJugados,
+    decimal PropinasTotal,
+    decimal CortesiasValor,
+    decimal ComisionesTotal,
+    decimal GastosTotal,
+    decimal PerdidasTotal,
+    decimal TotalGenerado,
+    decimal NetoTurno,
+    string? Observaciones,
+    string? DetalleJson,
+    string? SyncKey
 );
 
 public record LoginRequest(string Usuario, string Clave);

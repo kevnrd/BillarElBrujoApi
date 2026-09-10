@@ -1,0 +1,17 @@
+BILLAR EL BRUJO API - V36 CORTESIA COBRADA
+
+CAMBIO PRINCIPAL
+- La opción CORTESÍA ya NO es gratuita.
+- El servidor toma el precio vigente directamente de la presentación del producto en MySQL.
+- Si el precio es 0 o no existe, la cortesía se rechaza.
+- El pedido móvil guarda el total real a cobrar.
+- Cada unidad aceptada mantiene comisión fija de Bs. 5 para la mesera.
+- Solo permite Tragos / Botellas, Servidos en vaso o categoría Vaso.
+
+USAR CON
+- Programa de escritorio: V96_CORTESIA_COBRADA
+- App Mesera: V13_CORTESIA_COBRADA
+
+VERIFICACIÓN
+Después del deploy en Railway, /health debe mostrar:
+V36_CORTESIA_COBRADA

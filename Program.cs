@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V35_ARQUEO_CIERRE_ADMIN",
+            version = "V36_CORTESIA_COBRADA",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -893,7 +893,7 @@ app.MapGet("/api/app-mesera/test", async (Db db, int sucursalId) =>
     return Results.Ok(new
     {
         ok = true,
-        version = "V34_CORTESIA_MESERA",
+        version = "V36_CORTESIA_COBRADA",
         sucursalId,
         productos,
         presentaciones,
@@ -912,19 +912,57 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
     if (req.Cantidad <= 0)
         return Results.BadRequest(new { ok = false, message = "Cantidad inválida." });
 
+    decimal precioCatalogoCortesia = 0M;
+
     if (esCortesia)
     {
-        await using var validar = new MySqlCommand("SELECT categoria FROM productos WHERE id = @id AND sucursal_id = @sucursal_id AND estado = 'ACTIVO' LIMIT 1;", con);
+        const string validarSql = """
+            SELECT p.categoria,
+                   COALESCE(
+                       (SELECT pr.precio_venta
+                          FROM presentaciones pr
+                         WHERE pr.id = @presentacion_id
+                           AND pr.producto_id = p.id
+                           AND pr.estado = 'ACTIVO'
+                         LIMIT 1),
+                       (SELECT pr2.precio_venta
+                          FROM presentaciones pr2
+                         WHERE pr2.producto_id = p.id
+                           AND pr2.estado = 'ACTIVO'
+                         ORDER BY pr2.id
+                         LIMIT 1),
+                       0
+                   ) AS precio_catalogo
+              FROM productos p
+             WHERE p.id = @id
+               AND p.sucursal_id = @sucursal_id
+               AND p.estado = 'ACTIVO'
+             LIMIT 1;
+        """;
+
+        await using var validar = new MySqlCommand(validarSql, con);
         validar.Parameters.AddWithValue("@id", req.ProductoId);
+        validar.Parameters.AddWithValue("@presentacion_id", req.PresentacionId);
         validar.Parameters.AddWithValue("@sucursal_id", req.SucursalId);
-        string categoria = Convert.ToString(await validar.ExecuteScalarAsync()) ?? "";
+
+        await using var rd = await validar.ExecuteReaderAsync();
+        if (!await rd.ReadAsync())
+            return Results.BadRequest(new { ok = false, message = "No se encontró el producto de cortesía." });
+
+        string categoria = rd.IsDBNull(rd.GetOrdinal("categoria")) ? "" : rd.GetString(rd.GetOrdinal("categoria"));
+        int precioOrdinal = rd.GetOrdinal("precio_catalogo");
+        precioCatalogoCortesia = rd.IsDBNull(precioOrdinal) ? 0M : rd.GetDecimal(precioOrdinal);
+
         string cat = categoria.Trim().ToUpperInvariant();
-        bool permitido = cat.Contains("TRAGO") || cat.Contains("BOTELLA") || cat.Contains("SERVIDOS EN VASO");
+        bool permitido = cat.Contains("TRAGO") || cat.Contains("BOTELLA") || cat.Contains("SERVIDOS EN VASO") || cat == "VASO";
         if (!permitido)
             return Results.BadRequest(new { ok = false, message = "La cortesía solo permite tragos en vaso o botella." });
+
+        if (precioCatalogoCortesia <= 0)
+            return Results.BadRequest(new { ok = false, message = "La cortesía debe tener un precio de venta mayor a Bs. 0." });
     }
 
-    decimal precioAplicado = esCortesia ? 0M : req.PrecioUnitario;
+    decimal precioAplicado = esCortesia ? precioCatalogoCortesia : req.PrecioUnitario;
     decimal subtotal = req.Cantidad * precioAplicado;
     bool generaComisionAplicada = esCortesia || req.GeneraComision;
     string tipoComisionAplicada = esCortesia ? "MONTO" : (req.TipoComision ?? "NINGUNA");
@@ -1003,7 +1041,7 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
             estado = "PENDIENTE",
             total = subtotal,
             comision_calculada = comision,
-            message = esCortesia ? "Cortesía enviada a caja." : "Pedido enviado a caja."
+            message = esCortesia ? "Cortesía enviada a caja con precio de catálogo para su cobro." : "Pedido enviado a caja."
         });
     }
     catch (Exception ex)
@@ -1088,12 +1126,40 @@ app.MapGet("/api/app-mesera/pedidos-pendientes", async (Db db, int sucursalId) =
 
     const string sql = """
         SELECT p.id, p.sucursal_id, p.mesa_id, p.mesa, p.mesera_usuario, p.mesera_nombre,
-               p.fecha, p.estado, p.total, p.observacion,
+               p.fecha, p.estado,
+               CASE
+                   WHEN p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%'
+                   THEN COALESCE((
+                       SELECT SUM(dd.cantidad * COALESCE(ppr.precio_venta, dd.precio_unitario, 0))
+                       FROM detalle_pedidos_movil dd
+                       LEFT JOIN presentaciones ppr
+                              ON ppr.id = dd.presentacion_id
+                             AND ppr.producto_id = dd.producto_id
+                             AND ppr.estado = 'ACTIVO'
+                       WHERE dd.pedido_id = p.id
+                   ), p.total)
+                   ELSE p.total
+               END AS total,
+               p.observacion,
                d.producto_id, d.presentacion_id, d.producto, d.presentacion, d.cantidad,
-               d.precio_unitario, d.subtotal, d.genera_comision, d.tipo_comision, d.valor_comision,
+               CASE
+                   WHEN p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%'
+                   THEN COALESCE(pr.precio_venta, d.precio_unitario, 0)
+                   ELSE d.precio_unitario
+               END AS precio_unitario,
+               CASE
+                   WHEN p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%'
+                   THEN d.cantidad * COALESCE(pr.precio_venta, d.precio_unitario, 0)
+                   ELSE d.subtotal
+               END AS subtotal,
+               d.genera_comision, d.tipo_comision, d.valor_comision,
                d.comision_calculada
         FROM pedidos_movil p
         INNER JOIN detalle_pedidos_movil d ON d.pedido_id = p.id
+        LEFT JOIN presentaciones pr
+               ON pr.id = d.presentacion_id
+              AND pr.producto_id = d.producto_id
+              AND pr.estado = 'ACTIVO'
         WHERE p.sucursal_id = @sucursalId
           AND p.estado = 'PENDIENTE'
         ORDER BY p.fecha;
@@ -1134,6 +1200,45 @@ app.MapPost("/api/app-mesera/pedidos/{id:long}/estado", async (Db db, SheetsRepo
 
         if (estado == "ACEPTADO" || estado == "ENTREGADO")
         {
+            // V36: corrige también cortesías antiguas que fueron guardadas en Bs. 0 por V35.
+            const string fixCourtesyDetailSql = """
+                UPDATE detalle_pedidos_movil d
+                INNER JOIN pedidos_movil p ON p.id = d.pedido_id
+                LEFT JOIN presentaciones pr
+                       ON pr.id = d.presentacion_id
+                      AND pr.producto_id = d.producto_id
+                      AND pr.estado = 'ACTIVO'
+                SET d.precio_unitario = COALESCE(pr.precio_venta, d.precio_unitario, 0),
+                    d.subtotal = d.cantidad * COALESCE(pr.precio_venta, d.precio_unitario, 0)
+                WHERE p.id = @id
+                  AND p.mesa_id <= 0
+                  AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%';
+            """;
+
+            await using (var fixDetail = new MySqlCommand(fixCourtesyDetailSql, con, tx))
+            {
+                fixDetail.Parameters.AddWithValue("@id", id);
+                await fixDetail.ExecuteNonQueryAsync();
+            }
+
+            const string fixCourtesyTotalSql = """
+                UPDATE pedidos_movil p
+                SET p.total = COALESCE((
+                    SELECT SUM(d.subtotal)
+                    FROM detalle_pedidos_movil d
+                    WHERE d.pedido_id = p.id
+                ), p.total)
+                WHERE p.id = @id
+                  AND p.mesa_id <= 0
+                  AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%';
+            """;
+
+            await using (var fixTotal = new MySqlCommand(fixCourtesyTotalSql, con, tx))
+            {
+                fixTotal.Parameters.AddWithValue("@id", id);
+                await fixTotal.ExecuteNonQueryAsync();
+            }
+
             const string comSql = """
                 INSERT INTO comisiones_meseras
                     (pedido_id, sucursal_id, mesa_id, mesera_usuario, mesera_nombre, fecha,
@@ -2311,7 +2416,7 @@ static async Task<IResult> AplicarStockTxtPaquetesV33(Db db, SheetsReporter shee
     return Results.Ok(new
     {
         ok = true,
-        version = "V34_CORTESIA_MESERA",
+        version = "V36_CORTESIA_COBRADA",
         message = "Stock calculado desde el TXT como cantidad de paquetes/entradas por unidades_por_entrada.",
         formula = "stock_actual = cantidad_TXT × unidades_por_entrada",
         sucursalId,
@@ -2383,7 +2488,7 @@ static async Task<IResult> AplicarStockInicialReferenciaV32(Db db, SheetsReporte
     return Results.Ok(new
     {
         ok = true,
-        version = "V34_CORTESIA_MESERA",
+        version = "V36_CORTESIA_COBRADA",
         message = "Stock inicial cargado con las cantidades visibles en las capturas del inventario.",
         sucursalId,
         productosActualizados,

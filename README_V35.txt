@@ -2,7 +2,7 @@ API V35 - BILLAR EL BRUJO - ARQUEO / CIERRE ADMIN
 
 Compatible con:
 - Programa de escritorio V90.
-- App Mesera V12.
+- App Mesera V13.
 
 NUEVO
 - POST /api/cierres-turno
@@ -13,4 +13,4 @@ NUEVO
 - El sync_key es único: volver a enviar el mismo cierre NO lo duplica ni lo reemplaza.
 
 /health debe mostrar:
-V35_ARQUEO_CIERRE_ADMIN
+V36_CORTESIA_COBRADA

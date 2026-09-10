@@ -4,7 +4,7 @@ API ASP.NET Core para BILLAR EL BRUJO, Railway + MySQL + Google Sheets.
 
 ## Versión esperada
 Abrir `/health` y verificar:
-`V35_ARQUEO_CIERRE_ADMIN`
+`V36_CORTESIA_COBRADA`
 
 ## Nuevo en V35
 - `POST /api/cierres-turno`: recibe un arqueo completo al cerrar caja.

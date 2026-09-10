@@ -1,0 +1,15 @@
+BILLAR EL BRUJO API V39 - CORTESÍA A MESA
+
+CAMBIO:
+- Una cortesía ya NO se registra como una venta separada sin mesa.
+- La App Mesera debe enviar mesa_id y mesa reales.
+- La API valida que la mesa siga activa/en juego.
+- La cortesía usa el precio real del catálogo.
+- Comisión: Bs. 5 por unidad.
+- El pedido queda PENDIENTE para que caja lo acepte.
+- Al aceptarlo en V100 se agrega al consumo de la mesa y se cobra cuando se cierra la cuenta completa.
+- Se mantiene compatibilidad de lectura con cortesías antiguas.
+
+USAR CON:
+- Programa V100_CORTESIA_A_MESA
+- App Mesera V15_CORTESIA_A_MESA

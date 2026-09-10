@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V38_CORTESIA_CATALOGO_COMPLETO",
+            version = "V39_CORTESIA_A_MESA",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -893,7 +893,7 @@ app.MapGet("/api/app-mesera/test", async (Db db, int sucursalId) =>
     return Results.Ok(new
     {
         ok = true,
-        version = "V38_CORTESIA_CATALOGO_COMPLETO",
+        version = "V39_CORTESIA_A_MESA",
         sucursalId,
         productos,
         presentaciones,
@@ -906,11 +906,41 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
 {
     await using var con = await db.OpenAsync();
     await EnsureAppMeseraTables(con);
+    await EnsureMesasEnVivoTables(con);
 
-    bool esCortesia = req.MesaId <= 0 && (req.Mesa ?? "").Contains("CORTES", StringComparison.OrdinalIgnoreCase);
+    bool esCortesia =
+        (req.Observacion ?? "").StartsWith("CORTESIA_MESA", StringComparison.OrdinalIgnoreCase) ||
+        (req.MesaId <= 0 && (req.Mesa ?? "").Contains("CORTES", StringComparison.OrdinalIgnoreCase)); // compatibilidad con pedidos antiguos
 
     if (req.Cantidad <= 0)
         return Results.BadRequest(new { ok = false, message = "Cantidad inválida." });
+
+    if (esCortesia)
+    {
+        if (req.MesaId <= 0)
+            return Results.BadRequest(new { ok = false, message = "La cortesía debe cargarse a una mesa que esté en juego. Actualiza la App Mesera." });
+
+        const string mesaActivaSql = """
+            SELECT estado
+            FROM mesa_estados
+            WHERE sucursal_id = @sucursal_id
+              AND mesa_id = @mesa_id
+            LIMIT 1;
+        """;
+
+        await using var mesaCmd = new MySqlCommand(mesaActivaSql, con);
+        mesaCmd.Parameters.AddWithValue("@sucursal_id", req.SucursalId);
+        mesaCmd.Parameters.AddWithValue("@mesa_id", req.MesaId);
+        string estadoMesa = Convert.ToString(await mesaCmd.ExecuteScalarAsync()) ?? "";
+
+        if (string.IsNullOrWhiteSpace(estadoMesa) ||
+            estadoMesa.Equals("LIBRE", StringComparison.OrdinalIgnoreCase) ||
+            estadoMesa.Equals("RESERVADA", StringComparison.OrdinalIgnoreCase) ||
+            estadoMesa.Equals("INACTIVA", StringComparison.OrdinalIgnoreCase))
+        {
+            return Results.BadRequest(new { ok = false, message = "La mesa seleccionada ya no está en juego. Actualiza las mesas e inténtalo otra vez." });
+        }
+    }
 
     decimal precioCatalogoCortesia = 0M;
 
@@ -953,7 +983,7 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
         int precioOrdinal = rd.GetOrdinal("precio_catalogo");
         precioCatalogoCortesia = rd.IsDBNull(precioOrdinal) ? 0M : rd.GetDecimal(precioOrdinal);
 
-        // V38: CORTESÍA puede usar cualquier producto ACTIVO del catálogo de la sucursal.
+        // V39: CORTESÍA puede usar cualquier producto ACTIVO y debe estar asociada a una mesa en juego.
         // El servidor sigue imponiendo el precio real del catálogo para evitar manipulación desde Android.
         if (precioCatalogoCortesia <= 0)
             return Results.BadRequest(new { ok = false, message = "La cortesía debe tener un precio de venta mayor a Bs. 0." });
@@ -1038,7 +1068,7 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
             estado = "PENDIENTE",
             total = subtotal,
             comision_calculada = comision,
-            message = esCortesia ? "Cortesía enviada a caja con precio de catálogo para su cobro." : "Pedido enviado a caja."
+            message = esCortesia ? "Cortesía enviada a caja para agregarla a la cuenta de la mesa." : "Pedido enviado a caja."
         });
     }
     catch (Exception ex)
@@ -1125,7 +1155,7 @@ app.MapGet("/api/app-mesera/pedidos-pendientes", async (Db db, int sucursalId) =
         SELECT p.id, p.sucursal_id, p.mesa_id, p.mesa, p.mesera_usuario, p.mesera_nombre,
                p.fecha, p.estado,
                CASE
-                   WHEN p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%'
+                   WHEN (UPPER(COALESCE(p.observacion, '')) LIKE 'CORTESIA_MESA%' OR (p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%'))
                    THEN COALESCE((
                        SELECT SUM(dd.cantidad * COALESCE(ppr.precio_venta, dd.precio_unitario, 0))
                        FROM detalle_pedidos_movil dd
@@ -1140,12 +1170,12 @@ app.MapGet("/api/app-mesera/pedidos-pendientes", async (Db db, int sucursalId) =
                p.observacion,
                d.producto_id, d.presentacion_id, d.producto, d.presentacion, d.cantidad,
                CASE
-                   WHEN p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%'
+                   WHEN (UPPER(COALESCE(p.observacion, '')) LIKE 'CORTESIA_MESA%' OR (p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%'))
                    THEN COALESCE(pr.precio_venta, d.precio_unitario, 0)
                    ELSE d.precio_unitario
                END AS precio_unitario,
                CASE
-                   WHEN p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%'
+                   WHEN (UPPER(COALESCE(p.observacion, '')) LIKE 'CORTESIA_MESA%' OR (p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%'))
                    THEN d.cantidad * COALESCE(pr.precio_venta, d.precio_unitario, 0)
                    ELSE d.subtotal
                END AS subtotal,
@@ -1208,8 +1238,10 @@ app.MapPost("/api/app-mesera/pedidos/{id:long}/estado", async (Db db, SheetsRepo
                 SET d.precio_unitario = COALESCE(pr.precio_venta, d.precio_unitario, 0),
                     d.subtotal = d.cantidad * COALESCE(pr.precio_venta, d.precio_unitario, 0)
                 WHERE p.id = @id
-                  AND p.mesa_id <= 0
-                  AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%';
+                  AND (
+                      UPPER(COALESCE(p.observacion, '')) LIKE 'CORTESIA_MESA%'
+                      OR (p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%')
+                  );
             """;
 
             await using (var fixDetail = new MySqlCommand(fixCourtesyDetailSql, con, tx))
@@ -1226,8 +1258,10 @@ app.MapPost("/api/app-mesera/pedidos/{id:long}/estado", async (Db db, SheetsRepo
                     WHERE d.pedido_id = p.id
                 ), p.total)
                 WHERE p.id = @id
-                  AND p.mesa_id <= 0
-                  AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%';
+                  AND (
+                      UPPER(COALESCE(p.observacion, '')) LIKE 'CORTESIA_MESA%'
+                      OR (p.mesa_id <= 0 AND UPPER(COALESCE(p.mesa, '')) LIKE '%CORTES%')
+                  );
             """;
 
             await using (var fixTotal = new MySqlCommand(fixCourtesyTotalSql, con, tx))
@@ -2474,7 +2508,7 @@ static async Task<IResult> AplicarStockTxtPaquetesV33(Db db, SheetsReporter shee
     return Results.Ok(new
     {
         ok = true,
-        version = "V38_CORTESIA_CATALOGO_COMPLETO",
+        version = "V39_CORTESIA_A_MESA",
         message = "Stock calculado desde el TXT como cantidad de paquetes/entradas por unidades_por_entrada.",
         formula = "stock_actual = cantidad_TXT × unidades_por_entrada",
         sucursalId,
@@ -2546,7 +2580,7 @@ static async Task<IResult> AplicarStockInicialReferenciaV32(Db db, SheetsReporte
     return Results.Ok(new
     {
         ok = true,
-        version = "V38_CORTESIA_CATALOGO_COMPLETO",
+        version = "V39_CORTESIA_A_MESA",
         message = "Stock inicial cargado con las cantidades visibles en las capturas del inventario.",
         sucursalId,
         productosActualizados,

@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V37_TARIFA_MESAS",
+            version = "V38_CORTESIA_CATALOGO_COMPLETO",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -893,7 +893,7 @@ app.MapGet("/api/app-mesera/test", async (Db db, int sucursalId) =>
     return Results.Ok(new
     {
         ok = true,
-        version = "V37_TARIFA_MESAS",
+        version = "V38_CORTESIA_CATALOGO_COMPLETO",
         sucursalId,
         productos,
         presentaciones,
@@ -953,11 +953,8 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
         int precioOrdinal = rd.GetOrdinal("precio_catalogo");
         precioCatalogoCortesia = rd.IsDBNull(precioOrdinal) ? 0M : rd.GetDecimal(precioOrdinal);
 
-        string cat = categoria.Trim().ToUpperInvariant();
-        bool permitido = cat.Contains("TRAGO") || cat.Contains("BOTELLA") || cat.Contains("SERVIDOS EN VASO") || cat == "VASO";
-        if (!permitido)
-            return Results.BadRequest(new { ok = false, message = "La cortesía solo permite tragos en vaso o botella." });
-
+        // V38: CORTESÍA puede usar cualquier producto ACTIVO del catálogo de la sucursal.
+        // El servidor sigue imponiendo el precio real del catálogo para evitar manipulación desde Android.
         if (precioCatalogoCortesia <= 0)
             return Results.BadRequest(new { ok = false, message = "La cortesía debe tener un precio de venta mayor a Bs. 0." });
     }
@@ -2477,7 +2474,7 @@ static async Task<IResult> AplicarStockTxtPaquetesV33(Db db, SheetsReporter shee
     return Results.Ok(new
     {
         ok = true,
-        version = "V37_TARIFA_MESAS",
+        version = "V38_CORTESIA_CATALOGO_COMPLETO",
         message = "Stock calculado desde el TXT como cantidad de paquetes/entradas por unidades_por_entrada.",
         formula = "stock_actual = cantidad_TXT × unidades_por_entrada",
         sucursalId,
@@ -2549,7 +2546,7 @@ static async Task<IResult> AplicarStockInicialReferenciaV32(Db db, SheetsReporte
     return Results.Ok(new
     {
         ok = true,
-        version = "V37_TARIFA_MESAS",
+        version = "V38_CORTESIA_CATALOGO_COMPLETO",
         message = "Stock inicial cargado con las cantidades visibles en las capturas del inventario.",
         sucursalId,
         productosActualizados,

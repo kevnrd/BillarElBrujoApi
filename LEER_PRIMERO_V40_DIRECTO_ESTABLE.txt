@@ -1,0 +1,16 @@
+BILLAR EL BRUJO - API V40 DIRECTO ESTABLE
+
+- Los pedidos de mesera solo se aceptan para mesas activas.
+- Precio y presentación se validan en servidor.
+- El inventario del pedido móvil se reserva/descuenta atómicamente una sola vez.
+- Reintentos con el mismo syncKey no duplican pedido ni descuento.
+- La venta final sabe cuándo el inventario ya fue descontado y evita descontarlo otra vez.
+- Invitación/cortesía a mesera: comisión fija Bs. 5 por unidad. Pedido normal: comisión 0.
+- Ventas almacenan efectivo y QR por separado para pagos mixtos.
+- Consumos vivos de mesa conservan ID del pedido móvil y marca de inventario ya descontado.
+- Reportes de productos dañados/perdidos actualizan inventario una sola vez.
+- Reportes de daño del local usan producto_id=0 y no modifican inventario.
+
+DESPLIEGUE
+Subir esta API antes de actualizar Caja V104 y App Mesera V16.
+Las migraciones pequeñas se aplican automáticamente con CREATE/ALTER protegidos al iniciar los endpoints correspondientes.

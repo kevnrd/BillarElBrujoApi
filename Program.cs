@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V39_CORTESIA_A_MESA",
+            version = "V40_DIRECTO_ESTABLE",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -100,7 +100,7 @@ app.MapGet("/api/sheets/sync", async (Db db, SheetsReporter sheets) =>
 
 app.MapPost("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, string clave, bool? syncSheets) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
 
     if (clave != cleanKey)
         return Results.Unauthorized();
@@ -172,7 +172,7 @@ app.MapPost("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, s
 
 app.MapGet("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, string clave, bool? syncSheets) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
 
     if (clave != cleanKey)
         return Results.Unauthorized();
@@ -311,7 +311,7 @@ app.MapPost("/api/login", async (Db db, LoginRequest req) =>
 
 app.MapGet("/api/admin/usuarios", async (Db db, string clave) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -337,7 +337,7 @@ app.MapGet("/api/admin/usuarios", async (Db db, string clave) =>
 
 app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest req) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -411,7 +411,7 @@ app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest 
 
 app.MapPost("/api/admin/usuarios/{id:int}/estado", async (Db db, string clave, int id, UserEstadoRequest req) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -433,7 +433,7 @@ app.MapPost("/api/admin/usuarios/{id:int}/estado", async (Db db, string clave, i
 
 app.MapPost("/api/admin/productos/comision", async (Db db, string clave, ProductCommissionRequest req) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -490,7 +490,7 @@ app.MapPost("/api/admin/productos/comision", async (Db db, string clave, Product
 
 app.MapGet("/api/admin/productos/comision", async (Db db, string clave, int sucursalId) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -516,7 +516,7 @@ app.MapGet("/api/admin/productos/comision", async (Db db, string clave, int sucu
 
 app.MapPost("/api/admin/productos/guardar", async (Db db, SheetsReporter sheets, string clave, AdminProductRequest req) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     int sucursalId = req.SucursalId == 2 ? 2 : 1;
@@ -699,7 +699,7 @@ app.MapPost("/api/admin/productos/guardar", async (Db db, SheetsReporter sheets,
 
 app.MapGet("/api/admin/productos/detalle", async (Db db, string clave, int sucursalId) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -893,7 +893,7 @@ app.MapGet("/api/app-mesera/test", async (Db db, int sucursalId) =>
     return Results.Ok(new
     {
         ok = true,
-        version = "V39_CORTESIA_A_MESA",
+        version = "V40_DIRECTO_ESTABLE",
         sucursalId,
         productos,
         presentaciones,
@@ -915,20 +915,20 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
     if (req.Cantidad <= 0)
         return Results.BadRequest(new { ok = false, message = "Cantidad inválida." });
 
-    if (esCortesia)
+    // V40: TODOS los pedidos de la App Mesera deben pertenecer a una mesa activa.
+    if (req.MesaId <= 0)
+        return Results.BadRequest(new { ok = false, message = "El pedido debe cargarse a una mesa activa." });
+
+    const string mesaActivaSql = """
+        SELECT estado
+        FROM mesa_estados
+        WHERE sucursal_id = @sucursal_id
+          AND mesa_id = @mesa_id
+        LIMIT 1;
+    """;
+
+    await using (var mesaCmd = new MySqlCommand(mesaActivaSql, con))
     {
-        if (req.MesaId <= 0)
-            return Results.BadRequest(new { ok = false, message = "La cortesía debe cargarse a una mesa que esté en juego. Actualiza la App Mesera." });
-
-        const string mesaActivaSql = """
-            SELECT estado
-            FROM mesa_estados
-            WHERE sucursal_id = @sucursal_id
-              AND mesa_id = @mesa_id
-            LIMIT 1;
-        """;
-
-        await using var mesaCmd = new MySqlCommand(mesaActivaSql, con);
         mesaCmd.Parameters.AddWithValue("@sucursal_id", req.SucursalId);
         mesaCmd.Parameters.AddWithValue("@mesa_id", req.MesaId);
         string estadoMesa = Convert.ToString(await mesaCmd.ExecuteScalarAsync()) ?? "";
@@ -942,64 +942,122 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
         }
     }
 
-    decimal precioCatalogoCortesia = 0M;
+    // El servidor impone precio, presentación y disponibilidad reales del catálogo.
+    const string validarSql = """
+        SELECT p.id,
+               p.nombre,
+               p.categoria,
+               p.stock_actual,
+               COALESCE(p.sin_limite_stock, 0) AS sin_limite_stock,
+               COALESCE(pr.cantidad_base, 1) AS cantidad_base,
+               COALESCE(
+                   pr.precio_venta,
+                   (SELECT pr2.precio_venta
+                      FROM presentaciones pr2
+                     WHERE pr2.producto_id = p.id
+                       AND pr2.estado = 'ACTIVO'
+                     ORDER BY pr2.id
+                     LIMIT 1),
+                   0
+               ) AS precio_catalogo
+          FROM productos p
+          LEFT JOIN presentaciones pr
+                 ON pr.id = @presentacion_id
+                AND pr.producto_id = p.id
+                AND pr.estado = 'ACTIVO'
+         WHERE p.id = @id
+           AND p.sucursal_id = @sucursal_id
+           AND p.estado = 'ACTIVO'
+         LIMIT 1;
+    """;
 
-    if (esCortesia)
+    decimal precioCatalogo = 0M;
+    decimal stockActual = 0M;
+    decimal cantidadBase = 1M;
+    bool sinLimiteStock = false;
+
+    await using (var validar = new MySqlCommand(validarSql, con))
     {
-        const string validarSql = """
-            SELECT p.categoria,
-                   COALESCE(
-                       (SELECT pr.precio_venta
-                          FROM presentaciones pr
-                         WHERE pr.id = @presentacion_id
-                           AND pr.producto_id = p.id
-                           AND pr.estado = 'ACTIVO'
-                         LIMIT 1),
-                       (SELECT pr2.precio_venta
-                          FROM presentaciones pr2
-                         WHERE pr2.producto_id = p.id
-                           AND pr2.estado = 'ACTIVO'
-                         ORDER BY pr2.id
-                         LIMIT 1),
-                       0
-                   ) AS precio_catalogo
-              FROM productos p
-             WHERE p.id = @id
-               AND p.sucursal_id = @sucursal_id
-               AND p.estado = 'ACTIVO'
-             LIMIT 1;
-        """;
-
-        await using var validar = new MySqlCommand(validarSql, con);
         validar.Parameters.AddWithValue("@id", req.ProductoId);
         validar.Parameters.AddWithValue("@presentacion_id", req.PresentacionId);
         validar.Parameters.AddWithValue("@sucursal_id", req.SucursalId);
 
         await using var rd = await validar.ExecuteReaderAsync();
         if (!await rd.ReadAsync())
-            return Results.BadRequest(new { ok = false, message = "No se encontró el producto de cortesía." });
+            return Results.BadRequest(new { ok = false, message = "Producto no encontrado o inactivo." });
 
-        string categoria = rd.IsDBNull(rd.GetOrdinal("categoria")) ? "" : rd.GetString(rd.GetOrdinal("categoria"));
-        int precioOrdinal = rd.GetOrdinal("precio_catalogo");
-        precioCatalogoCortesia = rd.IsDBNull(precioOrdinal) ? 0M : rd.GetDecimal(precioOrdinal);
-
-        // V39: CORTESÍA puede usar cualquier producto ACTIVO y debe estar asociada a una mesa en juego.
-        // El servidor sigue imponiendo el precio real del catálogo para evitar manipulación desde Android.
-        if (precioCatalogoCortesia <= 0)
-            return Results.BadRequest(new { ok = false, message = "La cortesía debe tener un precio de venta mayor a Bs. 0." });
+        precioCatalogo = rd.IsDBNull(rd.GetOrdinal("precio_catalogo")) ? 0M : rd.GetDecimal(rd.GetOrdinal("precio_catalogo"));
+        stockActual = rd.IsDBNull(rd.GetOrdinal("stock_actual")) ? 0M : rd.GetDecimal(rd.GetOrdinal("stock_actual"));
+        cantidadBase = rd.IsDBNull(rd.GetOrdinal("cantidad_base")) ? 1M : rd.GetDecimal(rd.GetOrdinal("cantidad_base"));
+        sinLimiteStock = !rd.IsDBNull(rd.GetOrdinal("sin_limite_stock")) && rd.GetInt32(rd.GetOrdinal("sin_limite_stock")) == 1;
     }
 
-    decimal precioAplicado = esCortesia ? precioCatalogoCortesia : req.PrecioUnitario;
+    if (precioCatalogo <= 0)
+        return Results.BadRequest(new { ok = false, message = "El producto no tiene precio de venta válido." });
+
+    decimal unidadesSolicitadas = Math.Max(1M, cantidadBase) * req.Cantidad;
+    if (!sinLimiteStock && stockActual < unidadesSolicitadas)
+    {
+        return Results.Conflict(new
+        {
+            ok = false,
+            code = "STOCK_INSUFICIENTE",
+            message = "Stock insuficiente para completar el pedido.",
+            disponible = stockActual,
+            solicitado = unidadesSolicitadas
+        });
+    }
+
+    decimal precioAplicado = precioCatalogo;
     decimal subtotal = req.Cantidad * precioAplicado;
-    bool generaComisionAplicada = esCortesia || req.GeneraComision;
-    string tipoComisionAplicada = esCortesia ? "MONTO" : (req.TipoComision ?? "NINGUNA");
-    decimal valorComisionAplicada = esCortesia ? 5M : req.ValorComision;
+    // V40: solo la invitación/cortesía a la mesera genera comisión fija de Bs. 5 por unidad.
+    bool generaComisionAplicada = esCortesia;
+    string tipoComisionAplicada = esCortesia ? "MONTO" : "NINGUNA";
+    decimal valorComisionAplicada = esCortesia ? 5M : 0M;
     string syncKey = string.IsNullOrWhiteSpace(req.SyncKey) ? Guid.NewGuid().ToString("N") : req.SyncKey;
 
     await using var tx = await con.BeginTransactionAsync();
 
     try
     {
+        bool pedidoYaExistia;
+        await using (var existePedido = new MySqlCommand("SELECT COUNT(*) FROM pedidos_movil WHERE sync_key = @sync_key;", con, tx))
+        {
+            existePedido.Parameters.AddWithValue("@sync_key", syncKey);
+            pedidoYaExistia = Convert.ToInt32(await existePedido.ExecuteScalarAsync() ?? 0) > 0;
+        }
+
+        // Reserva/descuenta el inventario UNA sola vez al recibir un pedido móvil nuevo.
+        // Así dos celulares no pueden vender la última unidad al mismo tiempo y el cierre de mesa
+        // no vuelve a descontar el mismo producto.
+        if (!pedidoYaExistia && !sinLimiteStock)
+        {
+            await using var reservarStock = new MySqlCommand("""
+                UPDATE productos
+                SET stock_actual = stock_actual - @unidades
+                WHERE id = @producto_id
+                  AND sucursal_id = @sucursal_id
+                  AND estado = 'ACTIVO'
+                  AND COALESCE(sin_limite_stock, 0) = 0
+                  AND stock_actual >= @unidades;
+            """, con, tx);
+            reservarStock.Parameters.AddWithValue("@unidades", unidadesSolicitadas);
+            reservarStock.Parameters.AddWithValue("@producto_id", req.ProductoId);
+            reservarStock.Parameters.AddWithValue("@sucursal_id", req.SucursalId);
+
+            int filas = await reservarStock.ExecuteNonQueryAsync();
+            if (filas != 1)
+            {
+                await tx.RollbackAsync();
+                return Results.Conflict(new
+                {
+                    ok = false,
+                    code = "STOCK_INSUFICIENTE",
+                    message = "Stock insuficiente. Otro pedido pudo haber usado las últimas unidades. Actualiza el catálogo e inténtalo otra vez."
+                });
+            }
+        }
+
         const string pedidoSql = """
             INSERT INTO pedidos_movil
                 (sucursal_id, mesa_id, mesa, mesera_usuario, mesera_nombre, fecha, estado, total, observacion, sync_key)
@@ -1068,7 +1126,7 @@ app.MapPost("/api/app-mesera/pedidos", async (Db db, AppPedidoMovilRequest req) 
             estado = "PENDIENTE",
             total = subtotal,
             comision_calculada = comision,
-            message = esCortesia ? "Cortesía enviada a caja para agregarla a la cuenta de la mesa." : "Pedido enviado a caja."
+            message = esCortesia ? "Cortesía recibida. Se cargará automáticamente a la mesa activa." : "Pedido recibido. Se cargará automáticamente a la mesa activa."
         });
     }
     catch (Exception ex)
@@ -1084,48 +1142,99 @@ app.MapPost("/api/app-mesera/reportes-producto", async (Db db, ProductReportRequ
     await using var con = await db.OpenAsync();
     await EnsureAppMeseraTables(con);
 
+    if (req.Cantidad <= 0)
+        return Results.BadRequest(new { ok = false, message = "Cantidad inválida." });
+
     string motivo = string.IsNullOrWhiteSpace(req.Motivo) ? "DAÑADO/PERDIDO" : req.Motivo.Trim().ToUpperInvariant();
     string syncKey = string.IsNullOrWhiteSpace(req.SyncKey) ? Guid.NewGuid().ToString("N") : req.SyncKey;
-    decimal costo = req.Cantidad * req.PrecioUnitario;
+    decimal costo = Math.Max(0, req.Cantidad * req.PrecioUnitario);
+    int sucursalId = req.SucursalId <= 0 ? 1 : req.SucursalId;
 
-    const string sql = """
-        INSERT INTO reportes_productos_movil
-            (sucursal_id, turno, usuario, nombre, fecha, producto_id, presentacion_id,
-             producto, presentacion, cantidad, precio_unitario, costo_perdido, motivo, observacion, sync_key)
-        VALUES
-            (@sucursal_id, @turno, @usuario, @nombre, NOW(), @producto_id, @presentacion_id,
-             @producto, @presentacion, @cantidad, @precio_unitario, @costo_perdido, @motivo, @observacion, @sync_key)
-        ON DUPLICATE KEY UPDATE
-            cantidad = VALUES(cantidad),
-            precio_unitario = VALUES(precio_unitario),
-            costo_perdido = VALUES(costo_perdido),
-            motivo = VALUES(motivo),
-            observacion = VALUES(observacion);
-    """;
+    await using var tx = await con.BeginTransactionAsync();
+    try
+    {
+        // INSERT IGNORE hace que reintentar el mismo syncKey no vuelva a descontar inventario.
+        const string sql = """
+            INSERT IGNORE INTO reportes_productos_movil
+                (sucursal_id, turno, usuario, nombre, fecha, producto_id, presentacion_id,
+                 producto, presentacion, cantidad, precio_unitario, costo_perdido, motivo, observacion, sync_key)
+            VALUES
+                (@sucursal_id, @turno, @usuario, @nombre, NOW(), @producto_id, @presentacion_id,
+                 @producto, @presentacion, @cantidad, @precio_unitario, @costo_perdido, @motivo, @observacion, @sync_key);
+        """;
 
-    await using var cmd = new MySqlCommand(sql, con);
-    cmd.Parameters.AddWithValue("@sucursal_id", req.SucursalId <= 0 ? 1 : req.SucursalId);
-    cmd.Parameters.AddWithValue("@turno", string.IsNullOrWhiteSpace(req.Turno) ? "MAÑANA" : req.Turno.Trim().ToUpperInvariant());
-    cmd.Parameters.AddWithValue("@usuario", req.Usuario ?? "");
-    cmd.Parameters.AddWithValue("@nombre", req.Nombre ?? "");
-    cmd.Parameters.AddWithValue("@producto_id", req.ProductoId);
-    cmd.Parameters.AddWithValue("@presentacion_id", req.PresentacionId);
-    cmd.Parameters.AddWithValue("@producto", req.Producto ?? "");
-    cmd.Parameters.AddWithValue("@presentacion", req.Presentacion ?? "");
-    cmd.Parameters.AddWithValue("@cantidad", req.Cantidad);
-    cmd.Parameters.AddWithValue("@precio_unitario", req.PrecioUnitario);
-    cmd.Parameters.AddWithValue("@costo_perdido", costo);
-    cmd.Parameters.AddWithValue("@motivo", motivo);
-    cmd.Parameters.AddWithValue("@observacion", req.Observacion ?? "");
-    cmd.Parameters.AddWithValue("@sync_key", syncKey);
-    await cmd.ExecuteNonQueryAsync();
+        await using var cmd = new MySqlCommand(sql, con, tx);
+        cmd.Parameters.AddWithValue("@sucursal_id", sucursalId);
+        cmd.Parameters.AddWithValue("@turno", string.IsNullOrWhiteSpace(req.Turno) ? "MAÑANA" : req.Turno.Trim().ToUpperInvariant());
+        cmd.Parameters.AddWithValue("@usuario", req.Usuario ?? "");
+        cmd.Parameters.AddWithValue("@nombre", req.Nombre ?? "");
+        cmd.Parameters.AddWithValue("@producto_id", req.ProductoId);
+        cmd.Parameters.AddWithValue("@presentacion_id", req.PresentacionId);
+        cmd.Parameters.AddWithValue("@producto", req.Producto ?? "");
+        cmd.Parameters.AddWithValue("@presentacion", req.Presentacion ?? "");
+        cmd.Parameters.AddWithValue("@cantidad", req.Cantidad);
+        cmd.Parameters.AddWithValue("@precio_unitario", Math.Max(0, req.PrecioUnitario));
+        cmd.Parameters.AddWithValue("@costo_perdido", costo);
+        cmd.Parameters.AddWithValue("@motivo", motivo);
+        cmd.Parameters.AddWithValue("@observacion", req.Observacion ?? "");
+        cmd.Parameters.AddWithValue("@sync_key", syncKey);
+        int insertado = await cmd.ExecuteNonQueryAsync();
 
-    return Results.Ok(new { ok = true, costo_perdido = costo, message = "Reporte de producto registrado." });
+        // Para un producto físico roto/perdido, el inventario real baja también.
+        // Los reportes de infraestructura usan producto_id=0 y no tocan inventario.
+        if (insertado == 1 && req.ProductoId > 0)
+        {
+            decimal factor = 1M;
+            if (req.PresentacionId > 0)
+            {
+                await using var factorCmd = new MySqlCommand("""
+                    SELECT COALESCE(cantidad_base, 1)
+                    FROM presentaciones
+                    WHERE id=@presentacion_id AND producto_id=@producto_id
+                    LIMIT 1;
+                """, con, tx);
+                factorCmd.Parameters.AddWithValue("@presentacion_id", req.PresentacionId);
+                factorCmd.Parameters.AddWithValue("@producto_id", req.ProductoId);
+                object? factorObj = await factorCmd.ExecuteScalarAsync();
+                if (factorObj != null && factorObj != DBNull.Value)
+                    factor = Math.Max(1M, Convert.ToDecimal(factorObj));
+            }
+
+            decimal unidades = Math.Max(0, req.Cantidad * factor);
+            await using var stockCmd = new MySqlCommand("""
+                UPDATE productos
+                SET stock_actual = CASE
+                    WHEN COALESCE(sin_limite_stock, 0) = 1 OR categoria = 'Servidos en vaso'
+                    THEN stock_actual
+                    ELSE GREATEST(stock_actual - @unidades, 0)
+                END
+                WHERE id=@producto_id AND sucursal_id=@sucursal_id;
+            """, con, tx);
+            stockCmd.Parameters.AddWithValue("@unidades", unidades);
+            stockCmd.Parameters.AddWithValue("@producto_id", req.ProductoId);
+            stockCmd.Parameters.AddWithValue("@sucursal_id", sucursalId);
+            await stockCmd.ExecuteNonQueryAsync();
+        }
+
+        await tx.CommitAsync();
+        return Results.Ok(new
+        {
+            ok = true,
+            costo_perdido = costo,
+            duplicado = insertado == 0,
+            message = req.ProductoId > 0 ? "Reporte registrado e inventario actualizado." : "Reporte de daño del establecimiento registrado."
+        });
+    }
+    catch (Exception ex)
+    {
+        await tx.RollbackAsync();
+        return Results.Problem("No se pudo registrar el reporte: " + ex.Message);
+    }
 });
 
 app.MapGet("/api/admin/productos-reportados", async (Db db, string clave) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1341,7 +1450,7 @@ app.MapGet("/api/config/tarifa-mesas", async (Db db) =>
 
 app.MapPost("/api/admin/tarifa-mesas", async (Db db, string clave, TableRateRequest req) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
     if (req.PrecioHora <= 0)
         return Results.BadRequest(new { ok = false, message = "La tarifa por hora debe ser mayor a 0." });
@@ -1437,7 +1546,7 @@ app.MapGet("/api/productos", async (Db db, int? sucursalId) =>
 
 app.MapPost("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1474,7 +1583,7 @@ app.MapPost("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
 
 app.MapGet("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1511,7 +1620,7 @@ app.MapGet("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
 
 app.MapPost("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter sheets, string clave) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1546,7 +1655,7 @@ app.MapPost("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter she
 
 app.MapGet("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter sheets, string clave) =>
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1605,7 +1714,7 @@ app.MapPost("/api/productos", async (Db db, SheetsReporter sheets, string clave,
 {
     // Endpoint legado protegido: el alta normal de productos se realiza desde
     // /api/admin/productos/guardar, que conserva toda la estructura del producto.
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
     if (p.SucursalId != 1 && p.SucursalId != 2)
         return Results.BadRequest(new { ok = false, message = "Sucursal inválida." });
@@ -1667,6 +1776,11 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 {
     await using var con = await db.OpenAsync();
     await EnsureAppMeseraTables(con);
+
+    // V40: conserva la división real de un pago MIXTO.
+    try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN efectivo DECIMAL(10,2) NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }
+    try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN qr DECIMAL(10,2) NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }
+
     await using var tx = await con.BeginTransactionAsync();
 
     try
@@ -1683,11 +1797,13 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
         }
 
         const string ventaSql = """
-            INSERT INTO ventas (sucursal_id, cajero, fecha, tipo, metodo_pago, total, sync_key)
-            VALUES (@sucursal_id, @cajero, @fecha, @tipo, @metodo_pago, @total, @sync_key)
+            INSERT INTO ventas (sucursal_id, cajero, fecha, tipo, metodo_pago, efectivo, qr, total, sync_key)
+            VALUES (@sucursal_id, @cajero, @fecha, @tipo, @metodo_pago, @efectivo, @qr, @total, @sync_key)
             ON DUPLICATE KEY UPDATE
                 total = VALUES(total),
-                metodo_pago = VALUES(metodo_pago);
+                metodo_pago = VALUES(metodo_pago),
+                efectivo = VALUES(efectivo),
+                qr = VALUES(qr);
             SELECT id FROM ventas WHERE sync_key = @sync_key LIMIT 1;
         """;
 
@@ -1697,6 +1813,8 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
         ventaCmd.Parameters.AddWithValue("@fecha", venta.Fecha);
         ventaCmd.Parameters.AddWithValue("@tipo", venta.Tipo);
         ventaCmd.Parameters.AddWithValue("@metodo_pago", venta.MetodoPago);
+        ventaCmd.Parameters.AddWithValue("@efectivo", Math.Max(0, venta.Efectivo));
+        ventaCmd.Parameters.AddWithValue("@qr", Math.Max(0, venta.Qr));
         ventaCmd.Parameters.AddWithValue("@total", venta.Total);
         ventaCmd.Parameters.AddWithValue("@sync_key", syncKey);
 
@@ -1818,7 +1936,7 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 
             // Una misma venta se reenvía durante la sincronización automática. El stock solo
             // debe descontarse la primera vez que llega ese sync_key.
-            if (!ventaYaExistia)
+            if (!ventaYaExistia && !d.StockAlreadyDiscountedOnline)
             {
                 await using var stockCmd = new MySqlCommand("""
                     UPDATE productos
@@ -1851,10 +1969,12 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 app.MapGet("/api/ventas", async (Db db, int? sucursalId) =>
 {
     await using var con = await db.OpenAsync();
+    try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN efectivo DECIMAL(10,2) NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }
+    try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN qr DECIMAL(10,2) NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }
 
     const string sql = """
         SELECT v.id, v.sucursal_id, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, v.cajero, v.fecha,
-               v.tipo, v.metodo_pago, v.total, v.sync_key
+               v.tipo, v.metodo_pago, COALESCE(v.efectivo,0) AS efectivo, COALESCE(v.qr,0) AS qr, v.total, v.sync_key
         FROM ventas v
         INNER JOIN sucursales s ON s.id = v.sucursal_id
         WHERE (@sucursalId IS NULL OR v.sucursal_id = @sucursalId)
@@ -2090,9 +2210,9 @@ app.MapPost("/api/mesas/estado", async (Db db, SheetsReporter sheets, MesaEstado
     {
         await using var det = new MySqlCommand("""
             INSERT INTO mesa_consumos_vivos
-            (sucursal_id, mesa_id, producto, presentacion, cantidad, precio_unitario, subtotal, actualizado)
+            (sucursal_id, mesa_id, producto, presentacion, cantidad, precio_unitario, subtotal, mobile_order_id, stock_already_discounted_online, actualizado)
             VALUES
-            (@sucursal_id, @mesa_id, @producto, @presentacion, @cantidad, @precio_unitario, @subtotal, NOW());
+            (@sucursal_id, @mesa_id, @producto, @presentacion, @cantidad, @precio_unitario, @subtotal, @mobile_order_id, @stock_already_discounted_online, NOW());
         """, con);
         det.Parameters.AddWithValue("@sucursal_id", m.SucursalId);
         det.Parameters.AddWithValue("@mesa_id", m.MesaId);
@@ -2101,6 +2221,8 @@ app.MapPost("/api/mesas/estado", async (Db db, SheetsReporter sheets, MesaEstado
         det.Parameters.AddWithValue("@cantidad", d.Cantidad);
         det.Parameters.AddWithValue("@precio_unitario", d.PrecioUnitario);
         det.Parameters.AddWithValue("@subtotal", d.Subtotal);
+        det.Parameters.AddWithValue("@mobile_order_id", Math.Max(0, d.MobileOrderId));
+        det.Parameters.AddWithValue("@stock_already_discounted_online", d.StockAlreadyDiscountedOnline ? 1 : 0);
         await det.ExecuteNonQueryAsync();
     }
 
@@ -2142,7 +2264,8 @@ app.MapGet("/api/mesas/consumos-vivos", async (Db db, int? sucursalId) =>
     string sql = $"""
         SELECT c.sucursal_id,
                CASE WHEN c.sucursal_id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal,
-               c.mesa_id, c.producto, c.presentacion, c.cantidad, c.precio_unitario, c.subtotal
+               c.mesa_id, c.producto, c.presentacion, c.cantidad, c.precio_unitario, c.subtotal,
+               c.mobile_order_id, c.stock_already_discounted_online
         FROM mesa_consumos_vivos c
         {where}
         ORDER BY c.sucursal_id, c.mesa_id, c.id;
@@ -2426,7 +2549,7 @@ static async Task TrySyncSheets(Db db, SheetsReporter sheets)
 
 static async Task<IResult> AplicarStockTxtPaquetesV33(Db db, SheetsReporter sheets, string clave, int sucursalId)
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
     if (sucursalId != 1 && sucursalId != 2)
         return Results.BadRequest(new { ok = false, message = "sucursalId debe ser 1 o 2." });
@@ -2508,7 +2631,7 @@ static async Task<IResult> AplicarStockTxtPaquetesV33(Db db, SheetsReporter shee
     return Results.Ok(new
     {
         ok = true,
-        version = "V39_CORTESIA_A_MESA",
+        version = "V40_DIRECTO_ESTABLE",
         message = "Stock calculado desde el TXT como cantidad de paquetes/entradas por unidades_por_entrada.",
         formula = "stock_actual = cantidad_TXT × unidades_por_entrada",
         sucursalId,
@@ -2522,7 +2645,7 @@ static async Task<IResult> AplicarStockTxtPaquetesV33(Db db, SheetsReporter shee
 
 static async Task<IResult> AplicarStockInicialReferenciaV32(Db db, SheetsReporter sheets, string clave, int sucursalId)
 {
-    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
+    const string cleanKey = "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
     if (sucursalId != 1 && sucursalId != 2)
         return Results.BadRequest(new { ok = false, message = "sucursalId debe ser 1 o 2." });
@@ -2580,7 +2703,7 @@ static async Task<IResult> AplicarStockInicialReferenciaV32(Db db, SheetsReporte
     return Results.Ok(new
     {
         ok = true,
-        version = "V39_CORTESIA_A_MESA",
+        version = "V40_DIRECTO_ESTABLE",
         message = "Stock inicial cargado con las cantidades visibles en las capturas del inventario.",
         sucursalId,
         productosActualizados,
@@ -3632,6 +3755,8 @@ static async Task EnsureMesasEnVivoTables(MySqlConnection con)
             cantidad DECIMAL(10,2) NOT NULL DEFAULT 0,
             precio_unitario DECIMAL(10,2) NOT NULL DEFAULT 0,
             subtotal DECIMAL(10,2) NOT NULL DEFAULT 0,
+            mobile_order_id BIGINT NOT NULL DEFAULT 0,
+            stock_already_discounted_online TINYINT(1) NOT NULL DEFAULT 0,
             actualizado DATETIME NOT NULL,
             INDEX idx_mesa_consumos_vivos (sucursal_id, mesa_id)
         );
@@ -3639,6 +3764,10 @@ static async Task EnsureMesasEnVivoTables(MySqlConnection con)
     {
         await cmd.ExecuteNonQueryAsync();
     }
+
+    // Compatibilidad con bases ya creadas en versiones anteriores.
+    try { await new MySqlCommand("ALTER TABLE mesa_consumos_vivos ADD COLUMN mobile_order_id BIGINT NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }
+    try { await new MySqlCommand("ALTER TABLE mesa_consumos_vivos ADD COLUMN stock_already_discounted_online TINYINT(1) NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }
 }
 
 static class PasswordHasher
@@ -4251,7 +4380,9 @@ public record MesaConsumoVivoRequest(
     string? Presentacion,
     decimal Cantidad,
     decimal PrecioUnitario,
-    decimal Subtotal
+    decimal Subtotal,
+    int MobileOrderId,
+    bool StockAlreadyDiscountedOnline
 );
 
 public record MesaEstadoRequest(
@@ -4379,7 +4510,8 @@ public record VentaDetalleRequest(
     decimal Cantidad,
     decimal CantidadBase,
     decimal PrecioUnitario,
-    decimal Subtotal
+    decimal Subtotal,
+    bool StockAlreadyDiscountedOnline
 );
 
 public record VentaRequest(
@@ -4388,6 +4520,8 @@ public record VentaRequest(
     DateTime Fecha,
     string Tipo,
     string MetodoPago,
+    decimal Efectivo,
+    decimal Qr,
     decimal Total,
     string? SyncKey,
     List<VentaDetalleRequest> Detalle

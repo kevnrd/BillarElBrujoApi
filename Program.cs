@@ -100,7 +100,7 @@ app.MapGet("/api/sheets/sync", async (Db db, SheetsReporter sheets) =>
 
 app.MapPost("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, string clave, bool? syncSheets) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
 
     if (clave != cleanKey)
         return Results.Unauthorized();
@@ -172,7 +172,7 @@ app.MapPost("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, s
 
 app.MapGet("/api/admin/limpiar-pruebas", async (Db db, SheetsReporter sheets, string clave, bool? syncSheets) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
 
     if (clave != cleanKey)
         return Results.Unauthorized();
@@ -311,7 +311,7 @@ app.MapPost("/api/login", async (Db db, LoginRequest req) =>
 
 app.MapGet("/api/admin/usuarios", async (Db db, string clave) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -337,7 +337,7 @@ app.MapGet("/api/admin/usuarios", async (Db db, string clave) =>
 
 app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest req) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -411,7 +411,7 @@ app.MapPost("/api/admin/usuarios", async (Db db, string clave, AdminUserRequest 
 
 app.MapPost("/api/admin/usuarios/{id:int}/estado", async (Db db, string clave, int id, UserEstadoRequest req) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -433,7 +433,7 @@ app.MapPost("/api/admin/usuarios/{id:int}/estado", async (Db db, string clave, i
 
 app.MapPost("/api/admin/productos/comision", async (Db db, string clave, ProductCommissionRequest req) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -490,7 +490,7 @@ app.MapPost("/api/admin/productos/comision", async (Db db, string clave, Product
 
 app.MapGet("/api/admin/productos/comision", async (Db db, string clave, int sucursalId) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -516,7 +516,7 @@ app.MapGet("/api/admin/productos/comision", async (Db db, string clave, int sucu
 
 app.MapPost("/api/admin/productos/guardar", async (Db db, SheetsReporter sheets, string clave, AdminProductRequest req) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     int sucursalId = req.SucursalId == 2 ? 2 : 1;
@@ -699,7 +699,7 @@ app.MapPost("/api/admin/productos/guardar", async (Db db, SheetsReporter sheets,
 
 app.MapGet("/api/admin/productos/detalle", async (Db db, string clave, int sucursalId) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1125,7 +1125,7 @@ app.MapPost("/api/app-mesera/reportes-producto", async (Db db, ProductReportRequ
 
 app.MapGet("/api/admin/productos-reportados", async (Db db, string clave) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1341,7 +1341,7 @@ app.MapGet("/api/config/tarifa-mesas", async (Db db) =>
 
 app.MapPost("/api/admin/tarifa-mesas", async (Db db, string clave, TableRateRequest req) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
     if (req.PrecioHora <= 0)
         return Results.BadRequest(new { ok = false, message = "La tarifa por hora debe ser mayor a 0." });
@@ -1437,7 +1437,7 @@ app.MapGet("/api/productos", async (Db db, int? sucursalId) =>
 
 app.MapPost("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1474,7 +1474,7 @@ app.MapPost("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
 
 app.MapGet("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1511,7 +1511,7 @@ app.MapGet("/api/admin/cargar-catalogo-local", async (Db db, string clave) =>
 
 app.MapPost("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter sheets, string clave) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1546,7 +1546,7 @@ app.MapPost("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter she
 
 app.MapGet("/api/admin/cargar-catalogo-final", async (Db db, SheetsReporter sheets, string clave) =>
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
 
     await using var con = await db.OpenAsync();
@@ -1605,7 +1605,7 @@ app.MapPost("/api/productos", async (Db db, SheetsReporter sheets, string clave,
 {
     // Endpoint legado protegido: el alta normal de productos se realiza desde
     // /api/admin/productos/guardar, que conserva toda la estructura del producto.
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
     if (p.SucursalId != 1 && p.SucursalId != 2)
         return Results.BadRequest(new { ok = false, message = "Sucursal inválida." });
@@ -2426,7 +2426,7 @@ static async Task TrySyncSheets(Db db, SheetsReporter sheets)
 
 static async Task<IResult> AplicarStockTxtPaquetesV33(Db db, SheetsReporter sheets, string clave, int sucursalId)
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
     if (sucursalId != 1 && sucursalId != 2)
         return Results.BadRequest(new { ok = false, message = "sucursalId debe ser 1 o 2." });
@@ -2522,7 +2522,7 @@ static async Task<IResult> AplicarStockTxtPaquetesV33(Db db, SheetsReporter shee
 
 static async Task<IResult> AplicarStockInicialReferenciaV32(Db db, SheetsReporter sheets, string clave, int sucursalId)
 {
-    const string cleanKey = "ENTREGAR_LIMPIO_2026";
+    string cleanKey = Environment.GetEnvironmentVariable("ADMIN_CLAVE") ?? "ENTREGAR_LIMPIO_2026";
     if (clave != cleanKey) return Results.Unauthorized();
     if (sucursalId != 1 && sucursalId != 2)
         return Results.BadRequest(new { ok = false, message = "sucursalId debe ser 1 o 2." });

@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V43_DEFENSA_FLUJO_CONTABLE",
+            version = "V45_DEFENSA_CONTABLE_TOTAL",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -53,6 +53,15 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Problem("No se pudo conectar a MySQL: " + ex.Message);
     }
 });
+
+app.MapGet("/api/system/version", () => Results.Ok(new
+{
+    ok = true,
+    apiVersion = "V45_DEFENSA_CONTABLE_TOTAL",
+    minimumClientVersion = 127,
+    accountingMode = "LIBRO_INMUTABLE_TRANSACCIONAL",
+    message = "Caja V127 o superior requerida para sincronizar ventas."
+}));
 
 app.MapGet("/api/sheets/status", (SheetsReporter sheets) =>
 {
@@ -1777,6 +1786,7 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
     await using var con = await db.OpenAsync();
     await EnsureAppMeseraTables(con);
     await EnsureVentaSyncProtection(con);
+    await EnsureAccountingLedger(con);
 
     // V40: conserva la división real de un pago MIXTO.
     try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN efectivo DECIMAL(10,2) NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }
@@ -1786,12 +1796,25 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 
     try
     {
+        // V45: bloqueo de cajas antiguas. Evita que una versión sin OperationKey/cola offline
+        // vuelva a inflar ventas o stock.
+        if (!venta.ClientVersion.HasValue || venta.ClientVersion.Value < 127)
+            return Results.Json(new { ok = false, message = "Caja desactualizada. Se requiere V127 o superior para registrar cobros en Railway.", minimumClientVersion = 127 }, statusCode: StatusCodes.Status426UpgradeRequired);
+
         string syncKey = string.IsNullOrWhiteSpace(venta.SyncKey)
             ? Guid.NewGuid().ToString("N")
             : venta.SyncKey.Trim();
         string operationKey = string.IsNullOrWhiteSpace(venta.OperationKey)
             ? ""
             : venta.OperationKey.Trim();
+
+        // V44: tercera defensa. Para clientes antiguos que todavía no envían OperationKey,
+        // el servidor construye una huella contable determinística. De este modo, si la misma
+        // venta vuelve con OTRO sync_key por una versión antigua, Railway la reconoce como la
+        // misma operación y no vuelve a insertar detalle, descontar stock ni sumar recaudación.
+        string legacyFingerprint = string.IsNullOrWhiteSpace(operationKey)
+            ? BuildLegacyAccountingFingerprint(venta)
+            : "";
 
         // V42: defensa estricta. Una sync_key representa una sola venta inmutable.
         // Si el mismo request llega otra vez por reintento de red, devolvemos la venta existente
@@ -1821,6 +1844,7 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 
         if (ventaExistenteId > 0)
         {
+            await EnsureLedgerForExistingSaleAsync(con, tx, ventaExistenteId, venta, syncKey, operationKey);
             await tx.CommitAsync();
             return Results.Ok(new { ok = true, id = ventaExistenteId, syncKey, operationKey, duplicated = false, idempotent = true });
         }
@@ -1854,8 +1878,29 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 
             if (opVentaId > 0)
             {
+                await EnsureLedgerForExistingSaleAsync(con, tx, opVentaId, venta, syncKey, operationKey);
                 await tx.CommitAsync();
                 return Results.Ok(new { ok = true, id = opVentaId, syncKey, operationKey, duplicated = false, idempotent = true, sameOperation = true });
+            }
+        }
+
+        // V44: respaldo para versiones antiguas sin OperationKey.
+        // No se usa para clientes nuevos, porque OperationKey es una identidad más fuerte.
+        if (!string.IsNullOrWhiteSpace(legacyFingerprint))
+        {
+            long huellaVentaId = 0;
+            await using (var fpCmd = new MySqlCommand("SELECT id FROM ventas WHERE legacy_fingerprint = @fp LIMIT 1;", con, tx))
+            {
+                fpCmd.Parameters.AddWithValue("@fp", legacyFingerprint);
+                var existingFp = await fpCmd.ExecuteScalarAsync();
+                if (existingFp != null) huellaVentaId = Convert.ToInt64(existingFp);
+            }
+
+            if (huellaVentaId > 0)
+            {
+                await EnsureLedgerForExistingSaleAsync(con, tx, huellaVentaId, venta, syncKey, operationKey);
+                await tx.CommitAsync();
+                return Results.Ok(new { ok = true, id = huellaVentaId, syncKey, operationKey, legacyFingerprint, idempotent = true, sameLegacyFingerprint = true });
             }
         }
 
@@ -1894,8 +1939,8 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
         bool ventaYaExistia = false;
 
         const string ventaSql = """
-            INSERT IGNORE INTO ventas (sucursal_id, cajero, fecha, tipo, metodo_pago, efectivo, qr, total, sync_key, operation_key)
-            VALUES (@sucursal_id, @cajero, @fecha, @tipo, @metodo_pago, @efectivo, @qr, @total, @sync_key, NULLIF(@operation_key,''));
+            INSERT IGNORE INTO ventas (sucursal_id, cajero, fecha, tipo, metodo_pago, efectivo, qr, total, sync_key, operation_key, legacy_fingerprint)
+            VALUES (@sucursal_id, @cajero, @fecha, @tipo, @metodo_pago, @efectivo, @qr, @total, @sync_key, NULLIF(@operation_key,''), NULLIF(@legacy_fingerprint,''));
         """;
 
         await using var ventaCmd = new MySqlCommand(ventaSql, con, tx);
@@ -1909,6 +1954,7 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
         ventaCmd.Parameters.AddWithValue("@total", venta.Total);
         ventaCmd.Parameters.AddWithValue("@sync_key", syncKey);
         ventaCmd.Parameters.AddWithValue("@operation_key", operationKey);
+        ventaCmd.Parameters.AddWithValue("@legacy_fingerprint", legacyFingerprint);
 
         int insertedRows = await ventaCmd.ExecuteNonQueryAsync();
         long ventaId;
@@ -1917,12 +1963,18 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
             FROM ventas
             WHERE sync_key = @sync_key
                OR (@operation_key <> '' AND operation_key = @operation_key)
-            ORDER BY CASE WHEN sync_key = @sync_key THEN 0 ELSE 1 END
+               OR (@legacy_fingerprint <> '' AND legacy_fingerprint = @legacy_fingerprint)
+            ORDER BY CASE
+                WHEN sync_key = @sync_key THEN 0
+                WHEN @operation_key <> '' AND operation_key = @operation_key THEN 1
+                ELSE 2
+            END
             LIMIT 1;
         """, con, tx))
         {
             idCmd.Parameters.AddWithValue("@sync_key", syncKey);
             idCmd.Parameters.AddWithValue("@operation_key", operationKey);
+            idCmd.Parameters.AddWithValue("@legacy_fingerprint", legacyFingerprint);
             await using var rd = await idCmd.ExecuteReaderAsync();
             if (!await rd.ReadAsync())
                 return Results.Conflict(new { ok = false, message = "No se pudo asegurar la identidad única del cobro. No se modificó inventario.", syncKey, operationKey });
@@ -2079,6 +2131,42 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
             }
         }
 
+        // V45: libro contable inmutable dentro de la MISMA transacción que venta+detalle+stock.
+        // Si este registro falla, se revierte toda la operación y no queda un cobro a medias.
+        await using (var ledgerCmd = new MySqlCommand("""
+            INSERT INTO libro_caja
+            (venta_id, sucursal_id, cajero, fecha, tipo, metodo_pago, efectivo, qr, total, sync_key, operation_key, estado)
+            VALUES
+            (@venta_id, @sucursal_id, @cajero, @fecha, @tipo, @metodo_pago, @efectivo, @qr, @total, @sync_key, NULLIF(@operation_key,''), 'CONFIRMADA');
+        """, con, tx))
+        {
+            ledgerCmd.Parameters.AddWithValue("@venta_id", ventaId);
+            ledgerCmd.Parameters.AddWithValue("@sucursal_id", venta.SucursalId);
+            ledgerCmd.Parameters.AddWithValue("@cajero", venta.Cajero ?? "");
+            ledgerCmd.Parameters.AddWithValue("@fecha", venta.Fecha);
+            ledgerCmd.Parameters.AddWithValue("@tipo", venta.Tipo ?? "VENTA");
+            ledgerCmd.Parameters.AddWithValue("@metodo_pago", venta.MetodoPago ?? "");
+            ledgerCmd.Parameters.AddWithValue("@efectivo", Math.Max(0, venta.Efectivo));
+            ledgerCmd.Parameters.AddWithValue("@qr", Math.Max(0, venta.Qr));
+            ledgerCmd.Parameters.AddWithValue("@total", venta.Total);
+            ledgerCmd.Parameters.AddWithValue("@sync_key", syncKey);
+            ledgerCmd.Parameters.AddWithValue("@operation_key", operationKey);
+            await ledgerCmd.ExecuteNonQueryAsync();
+        }
+
+        await using (var auditCmd = new MySqlCommand("""
+            INSERT INTO auditoria_contable
+            (fecha, usuario, sucursal_id, accion, entidad, entidad_id, detalle)
+            VALUES (NOW(), @usuario, @sucursal_id, 'CONFIRMAR_COBRO', 'VENTA', @entidad_id, @detalle);
+        """, con, tx))
+        {
+            auditCmd.Parameters.AddWithValue("@usuario", venta.Cajero ?? "");
+            auditCmd.Parameters.AddWithValue("@sucursal_id", venta.SucursalId);
+            auditCmd.Parameters.AddWithValue("@entidad_id", ventaId);
+            auditCmd.Parameters.AddWithValue("@detalle", $"{venta.Tipo}|{venta.MetodoPago}|{venta.Total:0.00}|{syncKey}|{operationKey}");
+            await auditCmd.ExecuteNonQueryAsync();
+        }
+
         await tx.CommitAsync();
 
         await TrySyncSheets(db, sheets);
@@ -2146,6 +2234,33 @@ app.MapGet("/api/detalle-ventas", async (Db db, int? sucursalId) =>
         : null;
 
     return Results.Ok(await db.QueryAsync(con, sql, parameters));
+});
+
+app.MapGet("/api/admin/conciliacion", async (Db db, string? clave, int? sucursalId) =>
+{
+    if (clave != "ENTREGAR_LIMPIO_2026") return Results.Unauthorized();
+    await using var con = await db.OpenAsync();
+    await EnsureAccountingLedger(con);
+
+    const string sql = """
+        SELECT
+            COALESCE((SELECT SUM(total) FROM ventas WHERE (@sucursalId IS NULL OR sucursal_id=@sucursalId)),0) AS ventas_total,
+            COALESCE((SELECT SUM(total) FROM libro_caja WHERE estado='CONFIRMADA' AND (@sucursalId IS NULL OR sucursal_id=@sucursalId)),0) AS libro_total,
+            COALESCE((SELECT SUM(efectivo+qr) FROM libro_caja WHERE estado='CONFIRMADA' AND (@sucursalId IS NULL OR sucursal_id=@sucursalId)),0) AS medios_total,
+            COALESCE((SELECT COUNT(*) FROM ventas WHERE (@sucursalId IS NULL OR sucursal_id=@sucursalId)),0) AS ventas_count,
+            COALESCE((SELECT COUNT(*) FROM libro_caja WHERE estado='CONFIRMADA' AND (@sucursalId IS NULL OR sucursal_id=@sucursalId)),0) AS libro_count;
+    """;
+    await using var cmd = new MySqlCommand(sql, con);
+    cmd.Parameters.AddWithValue("@sucursalId", sucursalId.HasValue ? sucursalId.Value : DBNull.Value);
+    await using var rd = await cmd.ExecuteReaderAsync();
+    await rd.ReadAsync();
+    decimal ventasTotal = rd.GetDecimal(0);
+    decimal libroTotal = rd.GetDecimal(1);
+    decimal mediosTotal = rd.GetDecimal(2);
+    long ventasCount = rd.GetInt64(3);
+    long libroCount = rd.GetInt64(4);
+    bool cuadra = Math.Abs(ventasTotal-libroTotal) < 0.01m && Math.Abs(libroTotal-mediosTotal) < 0.01m && ventasCount == libroCount;
+    return Results.Ok(new { ok=true, cuadra, ventasTotal, libroTotal, mediosTotal, ventasCount, libroCount, diferenciaVentasLibro = ventasTotal-libroTotal, diferenciaLibroMedios = libroTotal-mediosTotal });
 });
 
 app.MapPost("/api/cobros-mesa", async (Db db, SheetsReporter sheets, CobroMesaRequest c) =>
@@ -3516,6 +3631,66 @@ static async Task HashPlainUserPasswords(MySqlConnection con)
 }
 
 
+static async Task EnsureLedgerForExistingSaleAsync(MySqlConnection con, MySqlTransaction tx, long ventaId, VentaRequest venta, string syncKey, string operationKey)
+{
+    await using var cmd = new MySqlCommand("""
+        INSERT IGNORE INTO libro_caja
+        (venta_id, sucursal_id, cajero, fecha, tipo, metodo_pago, efectivo, qr, total, sync_key, operation_key, estado)
+        VALUES
+        (@venta_id, @sucursal_id, @cajero, @fecha, @tipo, @metodo_pago, @efectivo, @qr, @total, @sync_key, NULLIF(@operation_key,''), 'CONFIRMADA');
+    """, con, tx);
+    cmd.Parameters.AddWithValue("@venta_id", ventaId);
+    cmd.Parameters.AddWithValue("@sucursal_id", venta.SucursalId);
+    cmd.Parameters.AddWithValue("@cajero", venta.Cajero ?? "");
+    cmd.Parameters.AddWithValue("@fecha", venta.Fecha);
+    cmd.Parameters.AddWithValue("@tipo", venta.Tipo ?? "VENTA");
+    cmd.Parameters.AddWithValue("@metodo_pago", venta.MetodoPago ?? "");
+    cmd.Parameters.AddWithValue("@efectivo", Math.Max(0, venta.Efectivo));
+    cmd.Parameters.AddWithValue("@qr", Math.Max(0, venta.Qr));
+    cmd.Parameters.AddWithValue("@total", venta.Total);
+    cmd.Parameters.AddWithValue("@sync_key", syncKey);
+    cmd.Parameters.AddWithValue("@operation_key", operationKey);
+    await cmd.ExecuteNonQueryAsync();
+}
+
+static async Task EnsureAccountingLedger(MySqlConnection con)
+{
+    await using (var cmd = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS libro_caja (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            venta_id BIGINT NOT NULL,
+            sucursal_id INT NOT NULL,
+            cajero VARCHAR(100) NOT NULL,
+            fecha DATETIME NOT NULL,
+            tipo VARCHAR(60) NOT NULL,
+            metodo_pago VARCHAR(30) NOT NULL,
+            efectivo DECIMAL(12,2) NOT NULL DEFAULT 0,
+            qr DECIMAL(12,2) NOT NULL DEFAULT 0,
+            total DECIMAL(12,2) NOT NULL,
+            sync_key VARCHAR(220) NOT NULL,
+            operation_key VARCHAR(220) NULL,
+            estado VARCHAR(20) NOT NULL DEFAULT 'CONFIRMADA',
+            creado_en TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_libro_venta (venta_id),
+            UNIQUE KEY uk_libro_sync (sync_key),
+            UNIQUE KEY uk_libro_operation (operation_key)
+        );
+    """, con)) await cmd.ExecuteNonQueryAsync();
+
+    await using (var cmd = new MySqlCommand("""
+        CREATE TABLE IF NOT EXISTS auditoria_contable (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            fecha DATETIME NOT NULL,
+            usuario VARCHAR(100) NOT NULL,
+            sucursal_id INT NOT NULL,
+            accion VARCHAR(80) NOT NULL,
+            entidad VARCHAR(80) NOT NULL,
+            entidad_id BIGINT NOT NULL,
+            detalle TEXT NULL
+        );
+    """, con)) await cmd.ExecuteNonQueryAsync();
+}
+
 static async Task EnsureVentaSyncProtection(MySqlConnection con)
 {
     // V41: protege ventas por sync_key. No borra datos existentes automaticamente.
@@ -3549,6 +3724,42 @@ static async Task EnsureVentaSyncProtection(MySqlConnection con)
     // no el intento de sincronización. Dos PCs no pueden confirmar la misma operación.
     try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN operation_key VARCHAR(220) NULL AFTER sync_key;", con).ExecuteNonQueryAsync(); } catch { }
     try { await new MySqlCommand("ALTER TABLE ventas ADD UNIQUE KEY uk_ventas_operation_key (operation_key);", con).ExecuteNonQueryAsync(); } catch { }
+
+    // V44: huella de respaldo para cajas antiguas que no mandan operation_key.
+    // NULL para ventas nuevas con OperationKey; hash SHA-256 para solicitudes legacy.
+    try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN legacy_fingerprint VARCHAR(64) NULL AFTER operation_key;", con).ExecuteNonQueryAsync(); } catch { }
+    try { await new MySqlCommand("ALTER TABLE ventas ADD UNIQUE KEY uk_ventas_legacy_fingerprint (legacy_fingerprint);", con).ExecuteNonQueryAsync(); } catch { }
+}
+
+static string BuildLegacyAccountingFingerprint(VentaRequest venta)
+{
+    static string N(string? value) => (value ?? "").Trim().ToUpperInvariant();
+    static string D(decimal value) => Math.Round(value, 2).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+
+    // La precisión se normaliza a segundo para coincidir con copias históricas guardadas en DATETIME.
+    DateTime fecha = venta.Fecha;
+    string moment = fecha.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
+
+    var detalle = (venta.Detalle ?? Array.Empty<VentaDetalleRequest>())
+        .Select(d => N(d.Producto) + "~" + N(d.Presentacion) + "~" +
+                     d.Cantidad.ToString(System.Globalization.CultureInfo.InvariantCulture) + "~" + D(d.Subtotal))
+        .OrderBy(x => x, StringComparer.OrdinalIgnoreCase);
+
+    string canonical = string.Join("|", new[]
+    {
+        venta.SucursalId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        N(venta.Cajero),
+        N(venta.Tipo),
+        N(venta.MetodoPago),
+        moment,
+        D(venta.Total),
+        D(Math.Max(0, venta.Efectivo)),
+        D(Math.Max(0, venta.Qr)),
+        string.Join(";", detalle)
+    });
+
+    byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+    return Convert.ToHexString(hash).ToLowerInvariant();
 }
 
 static async Task EnsureUserManagementTables(MySqlConnection con)
@@ -4716,7 +4927,8 @@ public record VentaRequest(
     decimal Total,
     string? SyncKey,
     string? OperationKey,
-    List<VentaDetalleRequest> Detalle
+    List<VentaDetalleRequest> Detalle,
+    int? ClientVersion = null
 );
 
 public record CobroMesaRequest(

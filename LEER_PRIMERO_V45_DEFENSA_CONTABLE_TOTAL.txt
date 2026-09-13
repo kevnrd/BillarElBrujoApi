@@ -1,0 +1,22 @@
+BILLAR EL BRUJO - API V45 DEFENSA CONTABLE TOTAL
+
+NUEVAS DEFENSAS
+1) Caja mínima V127 para registrar ventas nuevas.
+2) Libro de caja inmutable: libro_caja.
+3) Venta + detalle + descuento de stock + libro contable se guardan en una sola transacción.
+4) Si cualquier paso falla, MySQL hace ROLLBACK y no queda un cobro a medias.
+5) Auditoría de cada cobro confirmado.
+6) Se mantienen SyncKey + OperationKey + huella legacy de V44.
+7) Endpoint de conciliación:
+   /api/admin/conciliacion?clave=ENTREGAR_LIMPIO_2026
+8) EFECTIVO/QR/MIXTO deben cuadrar contra el total.
+9) Las cajas viejas quedan bloqueadas para ventas, evitando que una versión antigua vuelva a inflar Railway.
+
+ORDEN RECOMENDADO DE ACTUALIZACION
+A) Primero instalar Caja/Admin V127 en la sucursal. V127 puede trabajar temporalmente con API V44.
+B) Hacer backup de Railway/MySQL.
+C) Subir API V45.
+D) Ejecutar MIGRACION_V45_LIBRO_CONTABLE_INMUTABLE.sql una sola vez.
+E) Hacer una venta pequeña y consultar /api/admin/conciliacion.
+
+NO ejecutar TRUNCATE, DROP TABLE ni borrar ventas manualmente.

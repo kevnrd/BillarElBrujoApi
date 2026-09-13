@@ -1790,21 +1790,61 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
             ? Guid.NewGuid().ToString("N")
             : venta.SyncKey;
 
-        bool ventaYaExistia;
-        await using (var existeCmd = new MySqlCommand("SELECT COUNT(*) FROM ventas WHERE sync_key = @sync_key;", con, tx))
+        // V42: defensa estricta. Una sync_key representa una sola venta inmutable.
+        // Si el mismo request llega otra vez por reintento de red, devolvemos la venta existente
+        // y NO volvemos a tocar detalle, stock ni importes.
+        long ventaExistenteId = 0;
+        await using (var existeCmd = new MySqlCommand("""
+            SELECT id, sucursal_id, cajero, tipo, metodo_pago, COALESCE(efectivo,0), COALESCE(qr,0), total
+            FROM ventas WHERE sync_key = @sync_key LIMIT 1;
+        """, con, tx))
         {
             existeCmd.Parameters.AddWithValue("@sync_key", syncKey);
-            ventaYaExistia = Convert.ToInt32(await existeCmd.ExecuteScalarAsync() ?? 0) > 0;
+            await using var rd = await existeCmd.ExecuteReaderAsync();
+            if (await rd.ReadAsync())
+            {
+                ventaExistenteId = rd.GetInt64(0);
+                bool mismo = rd.GetInt32(1) == venta.SucursalId
+                    && string.Equals(rd.GetString(2), venta.Cajero ?? "", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(rd.GetString(3), venta.Tipo ?? "", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(rd.GetString(4), venta.MetodoPago ?? "", StringComparison.OrdinalIgnoreCase)
+                    && Math.Abs(rd.GetDecimal(5) - Math.Max(0, venta.Efectivo)) < 0.01m
+                    && Math.Abs(rd.GetDecimal(6) - Math.Max(0, venta.Qr)) < 0.01m
+                    && Math.Abs(rd.GetDecimal(7) - venta.Total) < 0.01m;
+                if (!mismo)
+                    return Results.Conflict(new { ok = false, message = "La misma sync_key ya existe con datos distintos. Se bloqueó el cobro para evitar duplicación o alteración.", syncKey, ventaId = ventaExistenteId });
+            }
         }
+
+        if (ventaExistenteId > 0)
+        {
+            await tx.CommitAsync();
+            return Results.Ok(new { ok = true, id = ventaExistenteId, syncKey, duplicated = false, idempotent = true });
+        }
+
+        if (venta.Total < 0 || venta.Efectivo < 0 || venta.Qr < 0)
+            return Results.BadRequest(new { ok = false, message = "Los importes no pueden ser negativos." });
+
+        string metodoSeguro = (venta.MetodoPago ?? "").Trim().ToUpperInvariant();
+        decimal sumaPago = Math.Round(Math.Max(0, venta.Efectivo) + Math.Max(0, venta.Qr), 2);
+        decimal totalSeguro = Math.Round(venta.Total, 2);
+        bool pagoCuadra = metodoSeguro switch
+        {
+            "EFECTIVO" => Math.Abs(Math.Max(0, venta.Efectivo) - totalSeguro) < 0.01m && Math.Abs(venta.Qr) < 0.01m,
+            "QR" => Math.Abs(Math.Max(0, venta.Qr) - totalSeguro) < 0.01m && Math.Abs(venta.Efectivo) < 0.01m,
+            "MIXTO" => Math.Abs(sumaPago - totalSeguro) < 0.01m,
+            _ => false
+        };
+        if (!pagoCuadra)
+            return Results.BadRequest(new { ok = false, message = "El método de pago no cuadra con el total. Se bloqueó el registro para evitar descuadres.", total = totalSeguro, efectivo = venta.Efectivo, qr = venta.Qr, metodo = metodoSeguro });
+
+        bool ventaYaExistia = false;
 
         const string ventaSql = """
             INSERT INTO ventas (sucursal_id, cajero, fecha, tipo, metodo_pago, efectivo, qr, total, sync_key)
             VALUES (@sucursal_id, @cajero, @fecha, @tipo, @metodo_pago, @efectivo, @qr, @total, @sync_key)
             ON DUPLICATE KEY UPDATE
-                total = VALUES(total),
-                metodo_pago = VALUES(metodo_pago),
-                efectivo = VALUES(efectivo),
-                qr = VALUES(qr);
+                sync_key = VALUES(sync_key);
             SELECT id FROM ventas WHERE sync_key = @sync_key LIMIT 1;
         """;
 
@@ -2058,21 +2098,44 @@ app.MapPost("/api/cobros-mesa", async (Db db, SheetsReporter sheets, CobroMesaRe
 
     string syncKey = string.IsNullOrWhiteSpace(c.SyncKey) ? Guid.NewGuid().ToString("N") : c.SyncKey;
 
+    // V42: cobro de mesa idempotente e inmutable por sync_key.
+    await using (var existing = new MySqlCommand("""
+        SELECT id, sucursal_id, COALESCE(session_id,0), COALESCE(mesa_id,0), total_mesa, total_consumo, total_cobrado, metodo_pago
+        FROM cobros_mesa WHERE sync_key = @sync_key LIMIT 1;
+    """, con))
+    {
+        existing.Parameters.AddWithValue("@sync_key", syncKey);
+        await using var rd = await existing.ExecuteReaderAsync();
+        if (await rd.ReadAsync())
+        {
+            bool mismo = rd.GetInt32(1) == c.SucursalId
+                && rd.GetInt32(2) == (c.SessionId ?? 0)
+                && rd.GetInt32(3) == (c.MesaId ?? 0)
+                && Math.Abs(rd.GetDecimal(4) - c.TotalMesa) < 0.01m
+                && Math.Abs(rd.GetDecimal(5) - c.TotalConsumo) < 0.01m
+                && Math.Abs(rd.GetDecimal(6) - c.TotalCobrado) < 0.01m
+                && string.Equals(rd.GetString(7), c.MetodoPago ?? "", StringComparison.OrdinalIgnoreCase);
+            long idExistente = rd.GetInt64(0);
+            if (!mismo)
+                return Results.Conflict(new { ok = false, message = "La misma sync_key de cobro ya existe con datos distintos. Se bloqueó para evitar doble cobro.", syncKey, id = idExistente });
+            return Results.Ok(new { ok = true, syncKey, id = idExistente, idempotent = true });
+        }
+    }
+
+    if (c.TotalMesa < 0 || c.TotalConsumo < 0 || c.TotalCobrado < 0)
+        return Results.BadRequest(new { ok = false, message = "Los totales del cobro no pueden ser negativos." });
+
+    decimal esperadoCobro = Math.Round(c.TotalMesa + c.TotalConsumo, 2);
+    if (Math.Abs(Math.Round(c.TotalCobrado, 2) - esperadoCobro) > 0.51m)
+        return Results.BadRequest(new { ok = false, message = "El total cobrado no coincide con mesa + consumo. Se bloqueó para evitar descuadre.", esperado = esperadoCobro, recibido = c.TotalCobrado });
+
     const string sql = """
         INSERT INTO cobros_mesa
         (sucursal_id, session_id, mesa_id, mesa, cajero, mesera, fecha, tiempo, total_mesa, total_consumo, total_cobrado, metodo_pago, sync_key)
         VALUES
         (@sucursal_id, @session_id, @mesa_id, @mesa, @cajero, @mesera, @fecha, @tiempo, @total_mesa, @total_consumo, @total_cobrado, @metodo_pago, @sync_key)
         ON DUPLICATE KEY UPDATE
-            mesa = VALUES(mesa),
-            cajero = VALUES(cajero),
-            mesera = VALUES(mesera),
-            fecha = VALUES(fecha),
-            tiempo = VALUES(tiempo),
-            total_mesa = VALUES(total_mesa),
-            total_consumo = VALUES(total_consumo),
-            total_cobrado = VALUES(total_cobrado),
-            metodo_pago = VALUES(metodo_pago);
+            sync_key = VALUES(sync_key);
     """;
 
     await using var cmd = new MySqlCommand(sql, con);
@@ -3796,6 +3859,11 @@ static async Task EnsureMesasEnVivoTables(MySqlConnection con)
     {
         await cmd.ExecuteNonQueryAsync();
     }
+
+    // V42: una misma mesa se identifica SIEMPRE por sucursal + mesa_id.
+    // También se intenta blindar sync_key para que una mesa de otra sucursal nunca pise su estado.
+    try { await new MySqlCommand("ALTER TABLE mesa_estados ADD UNIQUE KEY uk_mesa_estado_sucursal_mesa (sucursal_id, mesa_id);", con).ExecuteNonQueryAsync(); } catch { }
+    try { await new MySqlCommand("ALTER TABLE mesa_estados ADD UNIQUE KEY uk_mesa_estado_sync_key (sync_key);", con).ExecuteNonQueryAsync(); } catch { }
 
     // Compatibilidad con bases ya creadas en versiones anteriores.
     try { await new MySqlCommand("ALTER TABLE mesa_consumos_vivos ADD COLUMN mobile_order_id BIGINT NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }

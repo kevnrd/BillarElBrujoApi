@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V40_DIRECTO_ESTABLE",
+            version = "V41_ANTI_DUPLICADOS",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -1776,6 +1776,7 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 {
     await using var con = await db.OpenAsync();
     await EnsureAppMeseraTables(con);
+    await EnsureVentaSyncProtection(con);
 
     // V40: conserva la división real de un pago MIXTO.
     try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN efectivo DECIMAL(10,2) NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }
@@ -3362,6 +3363,37 @@ static async Task HashPlainUserPasswords(MySqlConnection con)
         update.Parameters.AddWithValue("@clave", PasswordHasher.Hash(item.clave));
         update.Parameters.AddWithValue("@id", item.id);
         await update.ExecuteNonQueryAsync();
+    }
+}
+
+
+static async Task EnsureVentaSyncProtection(MySqlConnection con)
+{
+    // V41: protege ventas por sync_key. No borra datos existentes automaticamente.
+    // Si ya existen duplicados historicos, la migracion V41 incluida debe ejecutarse una sola vez.
+    try
+    {
+        await using var normalize = new MySqlCommand("""
+            UPDATE ventas
+            SET sync_key = CONCAT('LEGACY-VENTA-', id)
+            WHERE sync_key IS NULL OR TRIM(sync_key) = '';
+        """, con);
+        await normalize.ExecuteNonQueryAsync();
+    }
+    catch { }
+
+    try
+    {
+        await using var idx = new MySqlCommand("""
+            ALTER TABLE ventas
+            ADD UNIQUE KEY uk_ventas_sync_key (sync_key);
+        """, con);
+        await idx.ExecuteNonQueryAsync();
+    }
+    catch
+    {
+        // Si falla por duplicados historicos, la API sigue operativa.
+        // Ejecutar MIGRACION_V41_UNIQUE_SYNC_KEY.sql para respaldar y consolidar duplicados.
     }
 }
 

@@ -1,0 +1,15 @@
+BILLAR EL BRUJO API V41 - ANTI DUPLICADOS
+
+OBJETIVO
+Evitar que una misma venta/cobro se registre dos veces por reintentos, doble sincronizacion o doble envio.
+
+PROTECCION
+1. ventas.sync_key queda protegido con indice UNIQUE.
+2. /api/ventas sigue siendo idempotente: mismo sync_key = misma venta.
+3. Los pedidos movil y cobros_mesa ya conservan sus UNIQUE existentes.
+4. MIGRACION_V41_UNIQUE_SYNC_KEY.sql respalda duplicados historicos antes de consolidarlos.
+
+IMPORTANTE
+- No usar DROP/TRUNCATE.
+- Hacer Backup de Railway antes de ejecutar la migracion.
+- Ejecutar MIGRACION_V41_UNIQUE_SYNC_KEY.sql UNA sola vez.

@@ -1,0 +1,23 @@
+BILLAR EL BRUJO - API V43 - DEFENSA DE FLUJO CONTABLE
+
+Objetivo:
+Evitar que ventas, cobros de mesa, pagos parciales o ventas directas se dupliquen o se desvien por doble clic, reintentos de Internet o dos computadoras sincronizando a la vez.
+
+Defensas nuevas:
+1. ventas.sync_key sigue siendo UNIQUE.
+2. ventas.operation_key agrega una segunda identidad de negocio.
+3. El mismo cierre final de una mesa usa una operation_key deterministica por sucursal + sesion.
+4. Si dos PCs intentan registrar la misma operacion, Railway devuelve la venta existente si los datos coinciden.
+5. Si la misma identidad llega con otro total, cajero, metodo o sucursal, la API responde 409 y bloquea el cobro.
+6. La venta se inserta con INSERT IGNORE + verificacion posterior para resistir carreras simultaneas.
+7. Antes de tocar detalle o inventario se valida que EFECTIVO/QR/MIXTO cuadre con el total.
+8. DIRECTA y CONSUMO_MESA deben cuadrar con la suma de productos redondeada a Bs 0,50.
+9. En MESA, el detalle de productos nunca puede superar el total cobrado.
+10. Un reintento idempotente no vuelve a tocar detalle ni stock.
+
+MIGRACION:
+Ejecutar MIGRACION_V43_DEFENSA_OPERACION_UNICA.sql una sola vez DESPUES de hacer backup de Railway/MySQL.
+La migracion no borra ventas.
+
+IMPORTANTE:
+No ejecutar TRUNCATE, DROP ni Preparar entrega sobre datos reales.

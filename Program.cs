@@ -42,7 +42,7 @@ app.MapGet("/health", async (Db db, SheetsReporter sheets) =>
         return Results.Ok(new
         {
             ok = true,
-            version = "V41_ANTI_DUPLICADOS",
+            version = "V43_DEFENSA_FLUJO_CONTABLE",
             database,
             mysql = "conectado",
             googleSheets = sheets.IsConfigured ? "configurado" : "faltan variables GOOGLE_SHEET_ID y GOOGLE_CREDENTIALS_JSON"
@@ -1788,7 +1788,10 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
     {
         string syncKey = string.IsNullOrWhiteSpace(venta.SyncKey)
             ? Guid.NewGuid().ToString("N")
-            : venta.SyncKey;
+            : venta.SyncKey.Trim();
+        string operationKey = string.IsNullOrWhiteSpace(venta.OperationKey)
+            ? ""
+            : venta.OperationKey.Trim();
 
         // V42: defensa estricta. Una sync_key representa una sola venta inmutable.
         // Si el mismo request llega otra vez por reintento de red, devolvemos la venta existente
@@ -1819,10 +1822,44 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
         if (ventaExistenteId > 0)
         {
             await tx.CommitAsync();
-            return Results.Ok(new { ok = true, id = ventaExistenteId, syncKey, duplicated = false, idempotent = true });
+            return Results.Ok(new { ok = true, id = ventaExistenteId, syncKey, operationKey, duplicated = false, idempotent = true });
         }
 
-        if (venta.Total < 0 || venta.Efectivo < 0 || venta.Qr < 0)
+        // V43: aunque una segunda PC genere otra sync_key, la misma operation_key
+        // no puede representar dos cobros diferentes.
+        if (!string.IsNullOrWhiteSpace(operationKey))
+        {
+            long opVentaId = 0;
+            await using (var opCmd = new MySqlCommand("""
+                SELECT id, sucursal_id, cajero, tipo, metodo_pago, COALESCE(efectivo,0), COALESCE(qr,0), total
+                FROM ventas WHERE operation_key = @operation_key LIMIT 1;
+            """, con, tx))
+            {
+                opCmd.Parameters.AddWithValue("@operation_key", operationKey);
+                await using var rd = await opCmd.ExecuteReaderAsync();
+                if (await rd.ReadAsync())
+                {
+                    opVentaId = rd.GetInt64(0);
+                    bool mismo = rd.GetInt32(1) == venta.SucursalId
+                        && string.Equals(rd.GetString(2), venta.Cajero ?? "", StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(rd.GetString(3), venta.Tipo ?? "", StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(rd.GetString(4), venta.MetodoPago ?? "", StringComparison.OrdinalIgnoreCase)
+                        && Math.Abs(rd.GetDecimal(5) - Math.Max(0, venta.Efectivo)) < 0.01m
+                        && Math.Abs(rd.GetDecimal(6) - Math.Max(0, venta.Qr)) < 0.01m
+                        && Math.Abs(rd.GetDecimal(7) - venta.Total) < 0.01m;
+                    if (!mismo)
+                        return Results.Conflict(new { ok = false, message = "La operación ya fue cobrada con datos distintos. Se bloqueó un posible doble cobro entre computadoras.", operationKey, ventaId = opVentaId });
+                }
+            }
+
+            if (opVentaId > 0)
+            {
+                await tx.CommitAsync();
+                return Results.Ok(new { ok = true, id = opVentaId, syncKey, operationKey, duplicated = false, idempotent = true, sameOperation = true });
+            }
+        }
+
+        if (venta.Total <= 0 || venta.Efectivo < 0 || venta.Qr < 0)
             return Results.BadRequest(new { ok = false, message = "Los importes no pueden ser negativos." });
 
         string metodoSeguro = (venta.MetodoPago ?? "").Trim().ToUpperInvariant();
@@ -1838,14 +1875,27 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
         if (!pagoCuadra)
             return Results.BadRequest(new { ok = false, message = "El método de pago no cuadra con el total. Se bloqueó el registro para evitar descuadres.", total = totalSeguro, efectivo = venta.Efectivo, qr = venta.Qr, metodo = metodoSeguro });
 
+        // V43: valida el contenido económico antes de tocar detalle o stock.
+        // DIRECTA y CONSUMO_MESA deben cuadrar con la suma de productos redondeada hacia arriba a Bs. 0,50.
+        // MESA puede incluir además el tiempo, por eso los productos nunca pueden superar el total cobrado.
+        if (venta.Detalle == null)
+            return Results.BadRequest(new { ok = false, message = "El detalle de la venta es obligatorio." });
+        if (venta.Detalle.Any(d => d.Cantidad <= 0 || d.PrecioUnitario < 0 || d.Subtotal < 0))
+            return Results.BadRequest(new { ok = false, message = "El detalle contiene cantidades o importes inválidos. Se bloqueó la venta." });
+
+        decimal detalleTotal = Math.Round(venta.Detalle.Sum(d => d.Subtotal), 2);
+        decimal detalleRedondeado = Math.Ceiling(detalleTotal * 2m) / 2m;
+        string tipoSeguro = (venta.Tipo ?? "").Trim().ToUpperInvariant();
+        if ((tipoSeguro == "DIRECTA" || tipoSeguro == "CONSUMO_MESA") && Math.Abs(detalleRedondeado - totalSeguro) > 0.01m)
+            return Results.BadRequest(new { ok = false, message = "El total cobrado no cuadra con los productos. Se bloqueó para evitar desviaciones.", detalle = detalleTotal, esperado = detalleRedondeado, recibido = totalSeguro });
+        if (tipoSeguro == "MESA" && detalleTotal - totalSeguro > 0.01m)
+            return Results.BadRequest(new { ok = false, message = "Los productos superan el total cobrado de la mesa. Se bloqueó para evitar un descuadre.", detalle = detalleTotal, total = totalSeguro });
+
         bool ventaYaExistia = false;
 
         const string ventaSql = """
-            INSERT INTO ventas (sucursal_id, cajero, fecha, tipo, metodo_pago, efectivo, qr, total, sync_key)
-            VALUES (@sucursal_id, @cajero, @fecha, @tipo, @metodo_pago, @efectivo, @qr, @total, @sync_key)
-            ON DUPLICATE KEY UPDATE
-                sync_key = VALUES(sync_key);
-            SELECT id FROM ventas WHERE sync_key = @sync_key LIMIT 1;
+            INSERT IGNORE INTO ventas (sucursal_id, cajero, fecha, tipo, metodo_pago, efectivo, qr, total, sync_key, operation_key)
+            VALUES (@sucursal_id, @cajero, @fecha, @tipo, @metodo_pago, @efectivo, @qr, @total, @sync_key, NULLIF(@operation_key,''));
         """;
 
         await using var ventaCmd = new MySqlCommand(ventaSql, con, tx);
@@ -1858,8 +1908,43 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
         ventaCmd.Parameters.AddWithValue("@qr", Math.Max(0, venta.Qr));
         ventaCmd.Parameters.AddWithValue("@total", venta.Total);
         ventaCmd.Parameters.AddWithValue("@sync_key", syncKey);
+        ventaCmd.Parameters.AddWithValue("@operation_key", operationKey);
 
-        var ventaId = Convert.ToInt64(await ventaCmd.ExecuteScalarAsync());
+        int insertedRows = await ventaCmd.ExecuteNonQueryAsync();
+        long ventaId;
+        await using (var idCmd = new MySqlCommand("""
+            SELECT id, sucursal_id, cajero, tipo, metodo_pago, COALESCE(efectivo,0), COALESCE(qr,0), total
+            FROM ventas
+            WHERE sync_key = @sync_key
+               OR (@operation_key <> '' AND operation_key = @operation_key)
+            ORDER BY CASE WHEN sync_key = @sync_key THEN 0 ELSE 1 END
+            LIMIT 1;
+        """, con, tx))
+        {
+            idCmd.Parameters.AddWithValue("@sync_key", syncKey);
+            idCmd.Parameters.AddWithValue("@operation_key", operationKey);
+            await using var rd = await idCmd.ExecuteReaderAsync();
+            if (!await rd.ReadAsync())
+                return Results.Conflict(new { ok = false, message = "No se pudo asegurar la identidad única del cobro. No se modificó inventario.", syncKey, operationKey });
+
+            ventaId = rd.GetInt64(0);
+            bool mismo = rd.GetInt32(1) == venta.SucursalId
+                && string.Equals(rd.GetString(2), venta.Cajero ?? "", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(rd.GetString(3), venta.Tipo ?? "", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(rd.GetString(4), venta.MetodoPago ?? "", StringComparison.OrdinalIgnoreCase)
+                && Math.Abs(rd.GetDecimal(5) - Math.Max(0, venta.Efectivo)) < 0.01m
+                && Math.Abs(rd.GetDecimal(6) - Math.Max(0, venta.Qr)) < 0.01m
+                && Math.Abs(rd.GetDecimal(7) - venta.Total) < 0.01m;
+            if (!mismo)
+                return Results.Conflict(new { ok = false, message = "Se detectó una colisión de identidad con otro cobro. Operación bloqueada.", syncKey, operationKey, ventaId });
+        }
+
+        ventaYaExistia = insertedRows == 0;
+        if (ventaYaExistia)
+        {
+            await tx.CommitAsync();
+            return Results.Ok(new { ok = true, id = ventaId, syncKey, operationKey, idempotent = true });
+        }
 
         await using (var del = new MySqlCommand("DELETE FROM detalle_ventas WHERE venta_id = @venta_id;", con, tx))
         {
@@ -1998,7 +2083,7 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 
         await TrySyncSheets(db, sheets);
 
-        return Results.Ok(new { ok = true, id = ventaId, syncKey });
+        return Results.Ok(new { ok = true, id = ventaId, syncKey, operationKey });
     }
     catch (Exception ex)
     {
@@ -2010,12 +2095,13 @@ app.MapPost("/api/ventas", async (Db db, SheetsReporter sheets, VentaRequest ven
 app.MapGet("/api/ventas", async (Db db, int? sucursalId) =>
 {
     await using var con = await db.OpenAsync();
+    await EnsureVentaSyncProtection(con);
     try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN efectivo DECIMAL(10,2) NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }
     try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN qr DECIMAL(10,2) NOT NULL DEFAULT 0;", con).ExecuteNonQueryAsync(); } catch { }
 
     const string sql = """
         SELECT v.id, v.sucursal_id, CASE WHEN s.id = 2 THEN 'SEGUNDA SUCURSAL' ELSE 'PRIMERA SUCURSAL' END AS sucursal, v.cajero, v.fecha,
-               v.tipo, v.metodo_pago, COALESCE(v.efectivo,0) AS efectivo, COALESCE(v.qr,0) AS qr, v.total, v.sync_key
+               v.tipo, v.metodo_pago, COALESCE(v.efectivo,0) AS efectivo, COALESCE(v.qr,0) AS qr, v.total, v.sync_key, COALESCE(v.operation_key,'') AS operation_key
         FROM ventas v
         INNER JOIN sucursales s ON s.id = v.sucursal_id
         WHERE (@sucursalId IS NULL OR v.sucursal_id = @sucursalId)
@@ -3458,6 +3544,11 @@ static async Task EnsureVentaSyncProtection(MySqlConnection con)
         // Si falla por duplicados historicos, la API sigue operativa.
         // Ejecutar MIGRACION_V41_UNIQUE_SYNC_KEY.sql para respaldar y consolidar duplicados.
     }
+
+    // V43: segunda identidad de seguridad. operation_key representa el COBRO de negocio,
+    // no el intento de sincronización. Dos PCs no pueden confirmar la misma operación.
+    try { await new MySqlCommand("ALTER TABLE ventas ADD COLUMN operation_key VARCHAR(220) NULL AFTER sync_key;", con).ExecuteNonQueryAsync(); } catch { }
+    try { await new MySqlCommand("ALTER TABLE ventas ADD UNIQUE KEY uk_ventas_operation_key (operation_key);", con).ExecuteNonQueryAsync(); } catch { }
 }
 
 static async Task EnsureUserManagementTables(MySqlConnection con)
@@ -4624,6 +4715,7 @@ public record VentaRequest(
     decimal Qr,
     decimal Total,
     string? SyncKey,
+    string? OperationKey,
     List<VentaDetalleRequest> Detalle
 );
 

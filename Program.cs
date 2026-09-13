@@ -3731,30 +3731,46 @@ static async Task EnsureVentaSyncProtection(MySqlConnection con)
     try { await new MySqlCommand("ALTER TABLE ventas ADD UNIQUE KEY uk_ventas_legacy_fingerprint (legacy_fingerprint);", con).ExecuteNonQueryAsync(); } catch { }
 }
 
+static string FingerprintNormalize(string? value)
+{
+    return (value ?? string.Empty).Trim().ToUpperInvariant();
+}
+
+static string FingerprintDecimal(decimal value)
+{
+    return Math.Round(value, 2).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+}
+
 static string BuildLegacyAccountingFingerprint(VentaRequest venta)
 {
-    static string N(string? value) => (value ?? "").Trim().ToUpperInvariant();
-    static string D(decimal value) => Math.Round(value, 2).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
-
     // La precisión se normaliza a segundo para coincidir con copias históricas guardadas en DATETIME.
     DateTime fecha = venta.Fecha;
     string moment = fecha.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
 
-    var detalle = (venta.Detalle ?? Array.Empty<VentaDetalleRequest>())
-        .Select(d => N(d.Producto) + "~" + N(d.Presentacion) + "~" +
-                     d.Cantidad.ToString(System.Globalization.CultureInfo.InvariantCulture) + "~" + D(d.Subtotal))
-        .OrderBy(x => x, StringComparer.OrdinalIgnoreCase);
+    var detalle = new List<string>();
+    if (venta.Detalle is not null)
+    {
+        foreach (var d in venta.Detalle)
+        {
+            detalle.Add(
+                FingerprintNormalize(d.Producto) + "~" +
+                FingerprintNormalize(d.Presentacion) + "~" +
+                d.Cantidad.ToString(System.Globalization.CultureInfo.InvariantCulture) + "~" +
+                FingerprintDecimal(d.Subtotal));
+        }
+    }
+    detalle.Sort(StringComparer.OrdinalIgnoreCase);
 
     string canonical = string.Join("|", new[]
     {
         venta.SucursalId.ToString(System.Globalization.CultureInfo.InvariantCulture),
-        N(venta.Cajero),
-        N(venta.Tipo),
-        N(venta.MetodoPago),
+        FingerprintNormalize(venta.Cajero),
+        FingerprintNormalize(venta.Tipo),
+        FingerprintNormalize(venta.MetodoPago),
         moment,
-        D(venta.Total),
-        D(Math.Max(0, venta.Efectivo)),
-        D(Math.Max(0, venta.Qr)),
+        FingerprintDecimal(venta.Total),
+        FingerprintDecimal(Math.Max(0, venta.Efectivo)),
+        FingerprintDecimal(Math.Max(0, venta.Qr)),
         string.Join(";", detalle)
     });
 

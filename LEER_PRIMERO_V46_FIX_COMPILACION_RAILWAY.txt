@@ -1,0 +1,12 @@
+BILLAR EL BRUJO API V46 - FIX COMPILACION RAILWAY
+
+Corrige los errores de compilacion observados en API V45:
+- CS0019 en BuildLegacyAccountingFingerprint: no se mezcla List<VentaDetalleRequest> con Array.Empty<T>().
+- CS8422: se eliminaron funciones locales estaticas dentro del generador de huella y se reemplazaron por helpers de nivel superior y un foreach explicito.
+
+No cambia la logica contable de V45: conserva sync_key, operation_key, legacy_fingerprint, transaccion de venta, libro_caja y auditoria.
+
+IMPORTANTE:
+1. Subir esta V46 al mismo repositorio de Railway reemplazando los archivos correspondientes.
+2. Esperar a que Railway compile y despliegue correctamente.
+3. Ejecutar MIGRACION_V45_LIBRO_CONTABLE_INMUTABLE.sql SOLO despues de que la API V46 este desplegada correctamente y exista backup de MySQL.
